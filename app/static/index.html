@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HAZOP AI Agent PoC</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <h1>HAZOP AI Agent PoC</h1>
+            <p>Excel의 #1/#2를 읽고 Agent가 근거 로그와 함께 #3/#4 초안을 생성합니다.</p>
+          </div>
+          <a class="sample-link" href="/static/sample-guide.html" target="_blank">샘플 안내</a>
+        </header>
+
+        <section class="input-panel">
+          <form id="hazop-form">
+            <label>
+              HAZOP Excel
+              <input name="file" type="file" accept=".xlsx" required />
+            </label>
+            <div class="node-preview">
+              <div class="node-preview__header">
+                <strong>Node별 물질정보</strong>
+                <span id="node-preview-status">Excel을 선택하면 Node별 입력칸이 표시됩니다.</span>
+              </div>
+              <div id="node-material-fields" class="node-material-fields">
+                <label>
+                  DI Water 공급 탱크
+                  <input type="text" data-node-name="DI Water 공급 탱크" value="DI Water" />
+                </label>
+                <label>
+                  DI Water 이송 펌프
+                  <input type="text" data-node-name="DI Water 이송 펌프" value="DI Water" />
+                </label>
+                <label>
+                  Wet 장비 공급 배관
+                  <input type="text" data-node-name="Wet 장비 공급 배관" value="DI Water" />
+                </label>
+              </div>
+              <textarea name="node_materials" id="node-materials" rows="3" hidden>DI Water 공급 탱크: DI Water
+DI Water 이송 펌프: DI Water
+Wet 장비 공급 배관: DI Water</textarea>
+            </div>
+            <div class="grid">
+              <label>
+                Maker
+                <input name="maker" value="CleanTech" required />
+              </label>
+              <label>
+                Model
+                <input name="model" value="CT-DIW-100" required />
+              </label>
+            </div>
+            <label>
+              주요 물질
+              <input name="materials" value="DI Water" required />
+            </label>
+            <label>
+              표준공정위험성평가서 Link 또는 ID
+              <input name="standard_hazop_link" value="표준 HAZOP-UTILITY-WATER-001" />
+            </label>
+            <label>
+              비고/이력 정보
+              <textarea name="notes" rows="3">최근 3년간 중대 사고 없음</textarea>
+            </label>
+            <button type="submit">AI 초안생성</button>
+          </form>
+        </section>
+
+        <section class="result-panel">
+          <div class="panel-header">
+            <h2>Agent 실시간 로그</h2>
+            <span id="status">대기 중</span>
+          </div>
+          <div id="logs" class="logs"></div>
+        </section>
+
+        <section class="tables">
+          <div>
+            <h2>#3 위험성평가</h2>
+            <div id="risk-table" class="table-wrap"></div>
+          </div>
+          <div>
+            <h2>#4 조치계획서</h2>
+            <div id="action-table" class="table-wrap"></div>
+          </div>
+        </section>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

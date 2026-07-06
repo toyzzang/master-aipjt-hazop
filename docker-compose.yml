@@ -1,0 +1,67 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: hazop-poc-postgres
+    environment:
+      POSTGRES_DB: hazop_poc
+      POSTGRES_USER: hazop
+      POSTGRES_PASSWORD: hazop
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hazop -d hazop_poc"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build: .
+    container_name: hazop-poc-streamlit
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PYTHONPATH: /app
+      DATABASE_URL: postgresql+psycopg://hazop:hazop@postgres:5432/hazop_poc
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-}
+      AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-}
+      AZURE_OPENAI_VERIFY_SSL: ${AZURE_OPENAI_VERIFY_SSL:-true}
+      KOSHA_MSDS_BASE_URL: ${KOSHA_MSDS_BASE_URL:-https://msds.kosha.or.kr}
+      AGENT_LOG_DELAY_SECONDS: ${AGENT_LOG_DELAY_SECONDS:-0.8}
+      AGENT_LLM_HEARTBEAT_SECONDS: ${AGENT_LLM_HEARTBEAT_SECONDS:-2.0}
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - ./samples:/app/samples
+
+  api:
+    build: .
+    container_name: hazop-poc-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      PYTHONPATH: /app
+      DATABASE_URL: postgresql+psycopg://hazop:hazop@postgres:5432/hazop_poc
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-}
+      AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-}
+      AZURE_OPENAI_VERIFY_SSL: ${AZURE_OPENAI_VERIFY_SSL:-true}
+      KOSHA_MSDS_BASE_URL: ${KOSHA_MSDS_BASE_URL:-https://msds.kosha.or.kr}
+      AGENT_LOG_DELAY_SECONDS: ${AGENT_LOG_DELAY_SECONDS:-0.8}
+      AGENT_LLM_HEARTBEAT_SECONDS: ${AGENT_LLM_HEARTBEAT_SECONDS:-2.0}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./samples:/app/samples
+
+volumes:
+  postgres-data:

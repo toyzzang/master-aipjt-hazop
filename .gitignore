@@ -1,0 +1,28 @@
+# Secrets and local environment files
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local runtime data
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/requests/
+data/uploads/
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/
+
+# Logs and temporary files
+*.log
+tmp/
+temp/
