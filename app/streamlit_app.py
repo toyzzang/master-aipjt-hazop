@@ -230,9 +230,93 @@ def _inject_styles() -> None:
     st.markdown(
         """
         <style>
+        :root {
+            --hazop-bg: #f7fafc;
+            --hazop-panel: #ffffff;
+            --hazop-panel-soft: #fbfdff;
+            --hazop-line: #dbe5ec;
+            --hazop-ink: #17212b;
+            --hazop-muted: #5f6f7a;
+            --hazop-accent: #17728a;
+            --hazop-accent-hover: #115a70;
+            --hazop-info: #eaf7fb;
+        }
+
+        .stApp {
+            background: var(--hazop-bg);
+            color: var(--hazop-ink);
+        }
+
         .block-container {
             padding-top: 2rem;
             max-width: 1440px;
+        }
+
+        h1, h2, h3, h4, h5, h6,
+        [data-testid="stMarkdownContainer"] strong {
+            color: var(--hazop-ink);
+        }
+
+        [data-testid="stCaptionContainer"],
+        [data-testid="stMarkdownContainer"] p {
+            color: var(--hazop-muted);
+        }
+
+        [data-testid="stVerticalBlockBorderWrapper"],
+        [data-testid="stForm"],
+        [data-testid="stExpander"] {
+            background: var(--hazop-panel);
+            border-color: var(--hazop-line);
+            box-shadow: 0 10px 28px rgba(23, 33, 43, 0.05);
+        }
+
+        [data-testid="stFileUploader"] section {
+            background: var(--hazop-panel-soft);
+            border-color: var(--hazop-line);
+        }
+
+        [data-testid="stTextInput"] input,
+        [data-testid="stTextArea"] textarea {
+            background: #ffffff;
+            border: 1px solid var(--hazop-line);
+            color: var(--hazop-ink);
+        }
+
+        [data-testid="stTextInput"] input:focus,
+        [data-testid="stTextArea"] textarea:focus {
+            border-color: var(--hazop-accent);
+            box-shadow: 0 0 0 1px var(--hazop-accent);
+        }
+
+        .stButton > button,
+        .stDownloadButton > button {
+            background: var(--hazop-accent);
+            border: 1px solid var(--hazop-accent);
+            color: #ffffff;
+            font-weight: 700;
+        }
+
+        .stButton > button:hover,
+        .stDownloadButton > button:hover {
+            background: var(--hazop-accent-hover);
+            border-color: var(--hazop-accent-hover);
+            color: #ffffff;
+        }
+
+        [data-testid="stAlert"] {
+            background: var(--hazop-info);
+            border-color: #b7e2ee;
+            color: var(--hazop-ink);
+        }
+
+        [data-testid="stDataFrame"] {
+            background: var(--hazop-panel);
+            border: 1px solid var(--hazop-line);
+            border-radius: 8px;
+        }
+
+        hr {
+            border-color: var(--hazop-line);
         }
         </style>
         """,
