@@ -1,0 +1,104 @@
+[
+  {
+    "id": "cleantech_diw_low_risk",
+    "title": "DI Water 저위험 Utility 케이스",
+    "sample_excel": "samples/HAZOP_CleanTech_CT-DIW-100.xlsx",
+    "input": {
+      "maker": "CleanTech",
+      "model": "CT-DIW-100",
+      "materials": "DI Water",
+      "node_materials": "DI Water 공급 탱크: DI Water\nDI Water 이송 펌프: DI Water\nWet 장비 공급 배관: DI Water",
+      "standard_hazop_link": "표준 HAZOP-UTILITY-WATER-001",
+      "notes": "최근 3년간 중대 사고 없음"
+    },
+    "msds": {
+      "di water": {
+        "material": "DI Water",
+        "hazards": ["일반적으로 인화성/독성 위험은 낮음", "누수 시 미끄럼, 설비 공급 중단, 전기설비 접촉 위험은 검토 필요"],
+        "handling": ["누수 즉시 배수/청소", "전기설비 주변 누수 여부 점검", "저액위/유량 알람 확인"],
+        "source": "scenario"
+      }
+    },
+    "expected": {
+      "node_count": 3,
+      "guideword_count": 5,
+      "risk_count": 5,
+      "action_count": 0,
+      "high_risk_count": 0
+    }
+  },
+  {
+    "id": "asm_silane_high_risk",
+    "title": "Silane/Hydrogen/Nitrogen 고위험 Gas 케이스",
+    "sample_excel": "samples/HAZOP_ASM_Epsilon3200.xlsx",
+    "input": {
+      "maker": "ASM",
+      "model": "Epsilon3200",
+      "materials": "Silane, Hydrogen, Nitrogen",
+      "node_materials": "Gas Cabinet: Silane\nVMB 및 공급 배관: Silane\nMFC 유량 제어 구간: Hydrogen\nPurge 및 Scrubber 구간: Nitrogen",
+      "standard_hazop_link": "표준 HAZOP-GAS-SILANE-001",
+      "notes": "Gas Cabinet 누설 알람 이력 확인 필요"
+    },
+    "msds": {
+      "silane": {
+        "material": "Silane",
+        "hazards": ["공기 중 자연발화 가능", "가연성/폭발성 분위기 형성 가능", "누출 시 작업자 대피 및 긴급 차단 필요"],
+        "handling": ["Gas Detector", "긴급차단밸브", "국소배기 및 Purge", "누설 점검 절차"],
+        "source": "scenario"
+      },
+      "hydrogen": {
+        "material": "Hydrogen",
+        "hazards": ["고인화성 가스", "누출 시 폭발성 분위기 형성 가능", "점화원 관리 필요"],
+        "handling": ["Gas Detector", "환기", "압력 관리", "누설 점검"],
+        "source": "scenario"
+      },
+      "nitrogen": {
+        "material": "Nitrogen",
+        "hazards": ["불활성 가스", "밀폐공간 산소결핍 위험", "고압가스 취급 위험"],
+        "handling": ["산소농도 관리", "환기", "압력조절밸브 점검", "Purge 절차 확인"],
+        "source": "scenario"
+      }
+    },
+    "expected": {
+      "node_count": 4,
+      "guideword_count": 6,
+      "risk_count": 6,
+      "action_count": 2,
+      "high_risk_count": 2
+    }
+  },
+  {
+    "id": "thermovac_hf_high_risk",
+    "title": "Vacuum/Etch/Exhaust/HF 복수 Guideword 케이스",
+    "sample_excel": "samples/HAZOP_ThermoVac_TV-ETCH-200.xlsx",
+    "input": {
+      "maker": "ThermoVac",
+      "model": "TV-ETCH-200",
+      "materials": "HF, Nitrogen",
+      "node_materials": "Etch Chamber: HF\nVacuum Pump Line: HF\nExhaust Scrubber: HF\nHF Chemical Supply: HF",
+      "standard_hazop_link": "표준 HAZOP-ETCH-HF-001",
+      "notes": "HF Chemical Supply 누출 대응 절차 확인 필요"
+    },
+    "msds": {
+      "hf": {
+        "material": "HF",
+        "hazards": ["급성 독성 및 부식성", "피부 접촉 시 중대한 화학화상 가능", "흡입 노출 위험"],
+        "handling": ["국소배기", "보호구", "누출 대응 키트", "비상샤워/세안설비"],
+        "source": "scenario"
+      },
+      "nitrogen": {
+        "material": "Nitrogen",
+        "hazards": ["불활성 가스", "밀폐공간 산소결핍 위험", "고압가스 취급 위험"],
+        "handling": ["산소농도 관리", "환기", "압력조절밸브 점검", "Purge 절차 확인"],
+        "source": "scenario"
+      }
+    },
+    "expected": {
+      "node_count": 4,
+      "guideword_count": 6,
+      "risk_count": 6,
+      "action_count": 1,
+      "high_risk_count": 1
+    }
+  }
+]
