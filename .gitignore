@@ -9,6 +9,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+.worktrees/
 
 # Local runtime data
 data/*.db

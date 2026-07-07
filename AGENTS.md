@@ -20,12 +20,24 @@
 ## Git 브랜치 작업 규칙
 
 - 앞으로 무언가 변경점에 대한 소스 변경이 발생하면 `main`에서 직접 작업하지 않는다.
-- 작업 시작 전에 워크트리에서 별도 브랜치를 생성하고, 그 브랜치에서만 수정한다.
+- `main` 브랜치는 항상 프로젝트 루트 `/Users/zzang/Desktop/me/project/master-aipjt`에 둔다.
+- 새 작업은 항상 프로젝트 루트의 `.worktrees/작업명` 아래에 별도 worktree를 만들어 진행한다.
+- 작업 시작 전에 `.worktrees/작업명`에 별도 브랜치를 생성하고, 그 브랜치에서만 수정한다.
+- 새 기능 작업을 시작할 때는 아래 형태를 기본으로 사용한다.
+  - `cd /Users/zzang/Desktop/me/project/master-aipjt`
+  - `git worktree add .worktrees/작업명 -b feature/작업명`
+  - `cd .worktrees/작업명`
+- 이미 존재하는 브랜치를 worktree로 열 때는 아래 형태를 사용한다.
+  - `cd /Users/zzang/Desktop/me/project/master-aipjt`
+  - `git worktree add .worktrees/작업명 feature/작업명`
+  - `cd .worktrees/작업명`
 - 기능 개발은 `feature/작업명` 형식의 브랜치를 사용한다.
   - 예: `feature/excel-upload-ui`
 - 버그 수정은 `bug/작업명` 형식의 브랜치를 사용한다.
   - 예: `bug/risk-score-calculation`
-- 쉽게 말하면, `main`은 완성본을 보관하는 책장이고 `feature/...`, `bug/...` 브랜치는 실제로 고치고 실험하는 작업 책상이다.
+- 쉽게 말하면, 루트의 `main`은 완성본을 보관하는 책장이고 `.worktrees/작업명`은 실제로 고치고 실험하는 작업 책상이다.
+- 같은 브랜치를 두 worktree에서 동시에 checkout하지 않는다.
+- worktree별 의존성이 달라질 수 있으므로, 필요하면 각 worktree에 별도 `.venv`를 둔다.
 
 ### 1. Think Before Coding
 
