@@ -39,6 +39,22 @@
 - 같은 브랜치를 두 worktree에서 동시에 checkout하지 않는다.
 - worktree별 의존성이 달라질 수 있으므로, 필요하면 각 worktree에 별도 `.venv`를 둔다.
 
+## PR 이후 정리 규칙
+
+- 사용자가 "정리해줘"라고 요청하면 먼저 아래를 확인한다.
+  - 작업 브랜치가 원격에 push되어 있는지 확인한다.
+  - 해당 원격 브랜치로 PR이 생성되어 있는지 확인한다.
+  - PR의 대상 브랜치가 사용자가 의도한 대상인지 확인한다. 기본 대상은 `main`이다.
+- 위 조건이 모두 충족되면 작업용 worktree를 삭제한다.
+  - 예: `git worktree remove .worktrees/작업명`
+- worktree 삭제 후 해당 로컬 브랜치도 삭제한다.
+  - 예: `git branch -d feature/작업명`
+- 원격 브랜치는 PR 상태에 따라 삭제 여부를 판단한다.
+  - PR이 아직 열려 있으면 원격 브랜치는 삭제하지 않는다.
+  - PR이 merge/close 되었고 사용자가 원격 브랜치 삭제도 원하면 `git push origin --delete feature/작업명`으로 삭제한다.
+- push 또는 PR 생성이 확인되지 않으면 worktree와 로컬 브랜치를 삭제하지 않는다.
+- 쉽게 말하면, "정리해줘"는 작업물이 GitHub에 안전하게 올라간 것을 확인한 뒤 로컬 작업 책상만 치우는 명령이다.
+
 ### 1. Think Before Coding
 
 - 애매한 요구사항은 조용히 추측해서 크게 구현하지 않는다.
