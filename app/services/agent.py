@@ -9,6 +9,8 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
+from app.hazop_engine.context import HazopDraftContext
+from app.hazop_engine.workflow import generate_hazop_draft
 from app.schemas.hazop import (
     ActionPlanRow,
     AgentEvidence,
@@ -108,70 +110,54 @@ async def run_hazop_agent(
         await _log_delay()
 
     if azure_openai_configured():
-        model_label = connected_model_label()
         yield _log(
-            "연결된 모델로 Agent 생성을 시작합니다.",
-            f"연결된 {model_label} 모델을 이용하여 #3 위험성평가 초안을 생성합니다.",
+            "Deepagent HAZOP Engine을 시작합니다.",
+            f"연결된 {connected_model_label()} 모델로 #3/#4 초안 생성, 근거 작성, 초안 검토를 수행합니다.",
         )
-        await _log_delay()
-        async for event in _run_risk_llm_with_progress(input_data, guidewords, msds_context):
-            if event.event == "result":
-                risk_rows = event.data["rows"]
-            else:
-                yield event
-                await _log_delay()
     else:
         yield _log(
-            "Demo Agent 생성을 시작합니다.",
-            "연결된 모델을 찾지 못해 PoC 내장 생성기로 #3 위험성평가 초안을 생성합니다. 흐름 검증용입니다.",
+            "Deepagent HAZOP Engine을 Demo 모드로 시작합니다.",
+            "연결된 모델을 찾지 못해 PoC 내장 생성기로 초안을 만들고, Deepagent 적용 지점은 유지합니다.",
+        )
+    await _log_delay()
+
+    draft_context = HazopDraftContext(
+        input_data=input_data,
+        nodes=nodes,
+        guidewords=guidewords,
+        msds_context=msds_context,
+    )
+    draft_result = await generate_hazop_draft(draft_context)
+    for engine_event in draft_result.events:
+        yield _log(engine_event.title, engine_event.detail)
+        await _log_delay()
+    if draft_result.fallback_reason:
+        yield _log(
+            "Fallback 사유를 기록했습니다.",
+            f"Deepagent 대신 demo 초안을 사용한 이유: {draft_result.fallback_reason}",
         )
         await _log_delay()
-        risk_rows = _generate_risk_rows_demo(input_data, guidewords, msds_context)
 
-    calculated_rows: list[RiskAssessmentRow] = []
-    for row in risk_rows:
-        frequency = clamp_frequency(row.frequency)
-        severity = clamp_severity(row.severity)
-        score = calculate_risk_score(frequency, severity)
-        calculated = row.model_copy(
-            update={
-                "frequency": frequency,
-                "severity": severity,
-                "risk_score": score,
-                "risk_level": risk_level(score),
-                "action_required": action_required(score),
-            }
-        )
-        calculated_rows.append(calculated)
+    calculated_rows = draft_result.risk_rows
+    action_rows = draft_result.action_rows
+    for row in calculated_rows:
         yield _log(
             f"{row.node_name} / {row.parameter} / {row.guideword} 위험도를 계산했습니다.",
-            f"근거: 빈도 {frequency} * 강도 {severity} = 위험도 {score}, 판단: {calculated.risk_level}, 조치필요여부: {calculated.action_required}",
+            f"근거: 빈도 {row.frequency} * 강도 {row.severity} = 위험도 {row.risk_score}, 판단: {row.risk_level}, 조치필요여부: {row.action_required}",
         )
         await _log_delay()
 
-    high_risk_rows = [row for row in calculated_rows if row.risk_score >= 9]
-    if high_risk_rows:
+    if action_rows:
         yield _log(
-            "#4 조치계획서 생성 대상을 선별했습니다.",
-            f"위험도 9 이상 항목 {len(high_risk_rows)}건을 조치계획서 생성 대상으로 선택했습니다.",
+            "#4 조치계획서 초안을 확보했습니다.",
+            f"위험도 9 이상 항목 기준으로 조치계획서 {len(action_rows)}건을 생성했습니다.",
         )
-        await _log_delay()
-        if azure_openai_configured():
-            async for event in _run_action_llm_with_progress(input_data, high_risk_rows, msds_context):
-                if event.event == "result":
-                    action_rows = event.data["rows"]
-                else:
-                    yield event
-                    await _log_delay()
-        else:
-            action_rows = _generate_action_rows_demo(high_risk_rows)
     else:
         yield _log(
             "#4 조치계획서 생성 대상이 없습니다.",
-            "모든 항목의 위험도가 9 미만이므로 별도 개선권고사항을 만들지 않습니다.",
+            "위험도 9 이상 항목이 없거나 검토 가능한 고위험 항목이 없어 별도 개선권고사항을 만들지 않습니다.",
         )
-        await _log_delay()
-        action_rows = []
+    await _log_delay()
 
     output_excel = workdir / f"HAZOP_RESULT_{input_data.maker}_{input_data.model}.xlsx"
     export_result_excel(excel_path, output_excel, calculated_rows, action_rows)
