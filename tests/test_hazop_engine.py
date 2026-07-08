@@ -2,7 +2,7 @@ import asyncio
 
 from app.hazop_engine.context import HazopDraftContext
 from app.hazop_engine.tools.validation_tools import parse_risk_rows
-from app.hazop_engine.workflow import generate_hazop_draft
+from app.hazop_engine.workflow import _describe_deepagent_exception, generate_hazop_draft
 from app.schemas.hazop import GuidewordRow, HazopInput, NodeRow
 from app.services.msds import MsdsSummary
 
@@ -67,3 +67,14 @@ def test_generate_hazop_draft_demo_fallback(monkeypatch):
     assert result.risk_rows[0].risk_score == 12
     assert result.risk_rows[0].action_required == "필요"
     assert len(result.action_rows) == 1
+
+
+def test_describe_deepagent_connection_error(monkeypatch):
+    monkeypatch.setenv("AZURE_OPENAI_VERIFY_SSL", "false")
+
+    reason = _describe_deepagent_exception(RuntimeError("Connection error."))
+
+    assert "Azure OpenAI 연결 단계" in reason
+    assert "AZURE_OPENAI_ENDPOINT" in reason
+    assert "AZURE_OPENAI_DEPLOYMENT" in reason
+    assert "AZURE_OPENAI_VERIFY_SSL=false" in reason
