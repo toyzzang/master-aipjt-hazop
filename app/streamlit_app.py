@@ -51,7 +51,11 @@ def main() -> None:
 
     with input_col:
         st.subheader("입력")
-        uploaded_file = st.file_uploader("HAZOP Excel 업로드", type=["xlsx"])
+        uploaded_file = st.file_uploader(
+            "HAZOP Excel 업로드",
+            type=["xlsx"],
+            help="샘플 또는 사용자가 작성한 .xlsx 파일을 선택하세요.",
+        )
         maker = st.text_input("Maker", value="CleanTech")
         model = st.text_input("Model", value="CT-DIW-100")
         materials = st.text_area("MSDS 기준 물질", value="DI Water", height=80)
@@ -231,28 +235,48 @@ def _inject_styles() -> None:
         """
         <style>
         :root {
-            --hazop-bg: #f7fafc;
-            --hazop-panel: #ffffff;
-            --hazop-panel-soft: #fbfdff;
-            --hazop-line: #dbe5ec;
-            --hazop-ink: #17212b;
-            --hazop-muted: #5f6f7a;
-            --hazop-accent: #17728a;
-            --hazop-accent-hover: #115a70;
-            --hazop-info: #eaf7fb;
+            --hazop-bg: #f7f4ee;
+            --hazop-paper: #fffdf8;
+            --hazop-surface: #ffffff;
+            --hazop-surface-soft: #fbf8f1;
+            --hazop-line: #e4ded2;
+            --hazop-line-strong: #d5cabc;
+            --hazop-ink: #2f2923;
+            --hazop-muted: #756d63;
+            --hazop-accent: #2f6f5e;
+            --hazop-accent-hover: #26584b;
+            --hazop-warning: #fff4d8;
+            --hazop-info: #eef6f2;
         }
 
         .stApp {
             background: var(--hazop-bg);
             color: var(--hazop-ink);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         }
 
         .block-container {
-            padding-top: 2rem;
-            max-width: 1440px;
+            padding-top: 1.6rem;
+            padding-bottom: 2.4rem;
+            max-width: 1380px;
         }
 
-        h1, h2, h3, h4, h5, h6,
+        h1, h2, h3, h4, h5, h6 {
+            color: var(--hazop-ink);
+            font-family: Georgia, "Times New Roman", serif;
+            font-weight: 650;
+            letter-spacing: 0;
+        }
+
+        h1 {
+            font-size: 2.35rem;
+            margin-bottom: 0.25rem;
+        }
+
+        h2, h3 {
+            font-size: 1.28rem;
+        }
+
         [data-testid="stMarkdownContainer"] strong {
             color: var(--hazop-ink);
         }
@@ -262,24 +286,54 @@ def _inject_styles() -> None:
             color: var(--hazop-muted);
         }
 
+        [data-testid="column"] {
+            background: var(--hazop-paper);
+            border: 1px solid var(--hazop-line);
+            border-radius: 8px;
+            padding: 1rem 1rem 1.1rem;
+            box-shadow: 0 1px 2px rgba(47, 41, 35, 0.04);
+        }
+
         [data-testid="stVerticalBlockBorderWrapper"],
         [data-testid="stForm"],
         [data-testid="stExpander"] {
-            background: var(--hazop-panel);
+            background: var(--hazop-surface);
             border-color: var(--hazop-line);
-            box-shadow: 0 10px 28px rgba(23, 33, 43, 0.05);
+            border-radius: 8px;
+            box-shadow: 0 1px 2px rgba(47, 41, 35, 0.05);
         }
 
         [data-testid="stFileUploader"] section {
-            background: var(--hazop-panel-soft);
-            border-color: var(--hazop-line);
+            background: var(--hazop-surface-soft);
+            border: 1.5px dashed var(--hazop-line-strong);
+            border-radius: 8px;
+            min-height: 118px;
+        }
+
+        [data-testid="stFileUploader"] section:hover {
+            background: #fffaf0;
+            border-color: var(--hazop-accent);
+        }
+
+        [data-testid="stFileUploader"] section * {
+            color: var(--hazop-ink);
+            pointer-events: auto;
+        }
+
+        [data-testid="stFileUploader"] button {
+            background: var(--hazop-surface);
+            border: 1px solid var(--hazop-line-strong);
+            color: var(--hazop-ink);
+            border-radius: 6px;
+            font-weight: 650;
         }
 
         [data-testid="stTextInput"] input,
         [data-testid="stTextArea"] textarea {
-            background: #ffffff;
+            background: var(--hazop-surface);
             border: 1px solid var(--hazop-line);
             color: var(--hazop-ink);
+            border-radius: 6px;
         }
 
         [data-testid="stTextInput"] input:focus,
@@ -294,6 +348,8 @@ def _inject_styles() -> None:
             border: 1px solid var(--hazop-accent);
             color: #ffffff;
             font-weight: 700;
+            border-radius: 6px;
+            min-height: 2.75rem;
         }
 
         .stButton > button:hover,
@@ -305,14 +361,19 @@ def _inject_styles() -> None:
 
         [data-testid="stAlert"] {
             background: var(--hazop-info);
-            border-color: #b7e2ee;
+            border-color: #c8ded5;
             color: var(--hazop-ink);
+            border-radius: 8px;
         }
 
         [data-testid="stDataFrame"] {
-            background: var(--hazop-panel);
+            background: var(--hazop-surface);
             border: 1px solid var(--hazop-line);
             border-radius: 8px;
+        }
+
+        [data-testid="stSpinner"] {
+            color: var(--hazop-accent);
         }
 
         hr {

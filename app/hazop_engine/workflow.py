@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -82,13 +83,14 @@ async def generate_hazop_draft(context: HazopDraftContext) -> HazopDraftResult:
             mode="deepagent",
         )
     except Exception as exc:
+        fallback_reason = _describe_deepagent_exception(exc)
         events.append(
             engine_event(
                 "Deepagent 실행 중 fallback으로 전환합니다.",
-                f"Deepagent 초안 생성이 완료되지 않아 PoC 내장 생성기를 사용합니다. 사유: {exc}",
+                f"Deepagent 초안 생성이 완료되지 않아 PoC 내장 생성기를 사용합니다. 사유: {fallback_reason}",
             )
         )
-        return _demo_result(context, events, str(exc))
+        return _demo_result(context, events, fallback_reason)
 
 
 async def _generate_risk_rows_with_deepagent(context: HazopDraftContext) -> list[RiskAssessmentRow]:
@@ -131,6 +133,66 @@ def _structured_response(result: Any) -> Any:
             return structured.model_dump()
         return structured
     return result
+
+
+def _describe_deepagent_exception(exc: Exception) -> str:
+    """DeepAgent 실패 원인을 사용자가 확인하기 쉬운 말로 바꿉니다.
+
+    쉽게 말하면 `Connection error`처럼 짧은 영어 경고만 보여주지 않고,
+    어떤 설정을 보면 되는지까지 함께 적어주는 함수입니다.
+    """
+
+    chain = _exception_chain(exc)
+    messages = [str(item).strip() for item in chain if str(item).strip()]
+    type_names = {type(item).__name__ for item in chain}
+    joined = " / ".join(messages) if messages else type(exc).__name__
+    lowered = joined.lower()
+
+    if "connection error" in lowered or "connecterror" in lowered or "connection" in lowered:
+        checks = [
+            "AZURE_OPENAI_ENDPOINT 접속 가능 여부",
+            "AZURE_OPENAI_API_KEY 값",
+            "AZURE_OPENAI_API_VERSION 값",
+            "AZURE_OPENAI_DEPLOYMENT 배포명",
+        ]
+        if os.getenv("AZURE_OPENAI_VERIFY_SSL", "true").lower() in {"0", "false", "no"}:
+            checks.append("사내 게이트웨이 SSL 설정(AZURE_OPENAI_VERIFY_SSL=false 적용 여부)")
+        return (
+            "Azure OpenAI 연결 단계에서 실패했습니다. "
+            f"원본 오류: {joined}. "
+            "확인할 항목: " + ", ".join(checks) + "."
+        )
+
+    if "ssl" in lowered or "certificate" in lowered:
+        return (
+            "SSL 인증서 검증 중 실패했습니다. "
+            f"원본 오류: {joined}. "
+            "사내 프록시/게이트웨이를 쓰는 환경이면 사내 CA 인증서를 설치하거나 "
+            "PoC에서만 AZURE_OPENAI_VERIFY_SSL=false를 확인하세요."
+        )
+
+    if "401" in joined or "unauthorized" in lowered:
+        return f"Azure OpenAI 인증에 실패했습니다. API key 또는 권한을 확인하세요. 원본 오류: {joined}."
+
+    if "404" in joined or "deployment" in lowered:
+        return f"Azure OpenAI 배포를 찾지 못했습니다. AZURE_OPENAI_DEPLOYMENT 값을 확인하세요. 원본 오류: {joined}."
+
+    if "timeout" in lowered:
+        return (
+            "Azure OpenAI 응답 대기 시간이 초과되었습니다. "
+            f"원본 오류: {joined}. endpoint 상태와 AZURE_OPENAI_TIMEOUT_SECONDS 값을 확인하세요."
+        )
+
+    return f"{type(exc).__name__}: {joined}. 관련 예외 종류: {', '.join(sorted(type_names))}."
+
+
+def _exception_chain(exc: Exception) -> list[BaseException]:
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    while current is not None and current not in chain:
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    return chain
 
 
 def _system_prompt() -> str:
