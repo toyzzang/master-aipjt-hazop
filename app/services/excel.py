@@ -66,6 +66,23 @@ def read_nodes_from_excel(path_or_file) -> list[NodeRow]:
         workbook.close()
 
 
+def read_input_preview_from_excel(path_or_file) -> tuple[list[NodeRow], list[GuidewordRow]]:
+    """업로드 Excel에서 화면 미리보기용 `#1`, `#2` 데이터를 읽습니다.
+
+    쉽게 말하면 사용자가 AI 초안생성을 누르기 전에, Excel에서 읽힌 Node와
+    각 Node에 연결된 변수/Guideword 조합을 화면에 먼저 보여주기 위한 함수입니다.
+    """
+
+    workbook = load_workbook(path_or_file, read_only=True, data_only=True)
+    try:
+        missing = [name for name in [NODE_SHEET, GUIDEWORD_SHEET] if name not in workbook.sheetnames]
+        if missing:
+            raise ValueError(f"필수 Sheet가 없습니다: {', '.join(missing)}")
+        return _read_nodes(workbook[NODE_SHEET]), _read_guidewords(workbook[GUIDEWORD_SHEET])
+    finally:
+        workbook.close()
+
+
 def validate_and_parse_excel(path: Path) -> tuple[list[NodeRow], list[GuidewordRow]]:
     """업로드 Excel에서 `#1`, `#2`를 검증하고 구조화 데이터로 바꿉니다.
 

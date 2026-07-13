@@ -11,6 +11,7 @@ class EngineEvent(BaseModel):
 
     title: str
     detail: str
+    kind: str = "agent"
 
 
 class IncidentHistoryContext(BaseModel):

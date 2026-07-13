@@ -67,6 +67,10 @@ def test_generate_hazop_draft_demo_fallback(monkeypatch):
     assert result.risk_rows[0].risk_score == 12
     assert result.risk_rows[0].action_required == "필요"
     assert len(result.action_rows) == 1
+    titles = [event.title for event in result.events]
+    assert "risk-draft-agent Sub Agent를 호출합니다." in titles
+    assert "risk-review-agent Sub Agent를 호출합니다." in titles
+    assert "action-plan-agent Sub Agent를 호출합니다." in titles
 
 
 def test_describe_deepagent_connection_error(monkeypatch):

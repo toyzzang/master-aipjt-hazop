@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any
+import time
+from typing import Any, Awaitable, Callable
 
 from pydantic import BaseModel, Field
 
@@ -14,7 +15,10 @@ from app.hazop_engine.tools.risk_tools import calculate_hazop_risk
 from app.hazop_engine.tools.standard_hazop_tools import lookup_standard_hazop
 from app.hazop_engine.tools.validation_tools import parse_action_rows, parse_risk_rows
 from app.schemas.hazop import ActionPlanRow, AgentEvidence, RiskAssessmentRow
-from app.services.llm import azure_openai_configured
+from app.services.llm import azure_openai_configured, missing_azure_openai_env
+
+
+ProgressCallback = Callable[[Any], Awaitable[None]]
 
 
 class DeepAgentRiskOutput(BaseModel):
@@ -31,50 +35,90 @@ class DeepAgentActionOutput(BaseModel):
     review_findings: list[str] = Field(default_factory=list)
 
 
-async def generate_hazop_draft(context: HazopDraftContext) -> HazopDraftResult:
+async def generate_hazop_draft(context: HazopDraftContext, progress: ProgressCallback | None = None) -> HazopDraftResult:
     """Deepagent 기반으로 HAZOP #3/#4 초안을 생성합니다.
 
     Deepagent를 실행할 수 없으면 PoC 흐름이 끊기지 않도록 규칙 기반 demo 결과로 fallback합니다.
     """
 
-    events = [
+    events = []
+    await _record_event(
+        events,
         engine_event(
             "Deepagent HAZOP Engine을 준비했습니다.",
             "전문 판단이 필요한 #3/#4 초안 생성만 Deepagent 영역에서 처리합니다.",
-        )
-    ]
+            kind="agent",
+        ),
+        progress,
+    )
 
     if not azure_openai_configured():
-        events.append(
+        missing_keys = ", ".join(missing_azure_openai_env())
+        await _record_event(
+            events,
             engine_event(
                 "Deepagent 실행을 생략합니다.",
-                "연결된 Azure OpenAI 설정이 없어 PoC 내장 생성기로 초안을 만듭니다.",
-            )
+                f"Azure OpenAI 설정이 서버에 전달되지 않았습니다. 비어 있는 키: {missing_keys}.",
+                kind="warning",
+            ),
+            progress,
         )
-        return _demo_result(context, events, "연결된 Azure OpenAI 설정이 없습니다.")
+        return await _demo_result(context, events, "연결된 Azure OpenAI 설정이 없습니다.", progress)
 
     try:
+        await _record_events(
+            events,
+            progress,
+            [
+                engine_event("risk-draft-agent Sub Agent를 호출합니다.", "#1 노드리스트와 #2 가이드워드만 사용해 #3 위험성평가 초안을 작성합니다.", kind="agent"),
+                engine_event("hazop_risk_draft 스킬을 참조합니다.", "Deviation, Cause, Consequence, Safeguard, 판단 근거 문장 작성 기준을 적용합니다.", kind="skill"),
+                engine_event("frequency_estimation 스킬을 참조합니다.", "빈도 후보는 사고이력, 유사 HAZOP 문서, 일반 HAZOP 규칙 순서로 근거를 확인합니다.", kind="skill"),
+                engine_event("모델 응답 대기 중입니다.", "risk-draft-agent가 Azure OpenAI에 #3 위험성평가 초안 생성을 요청했습니다.", kind="tool"),
+            ],
+        )
+        risk_started_at = time.perf_counter()
         risk_rows = await _generate_risk_rows_with_deepagent(context)
-        events.append(
+        risk_elapsed = time.perf_counter() - risk_started_at
+        await _record_event(
+            events,
             engine_event(
                 "#3 위험성평가 Deepagent 초안을 생성했습니다.",
-                f"작성자/검토자 흐름을 거쳐 위험성평가 Row {len(risk_rows)}건을 확보했습니다.",
-            )
+                f"작성자/검토자 흐름을 거쳐 위험성평가 Row {len(risk_rows)}건을 확보했습니다. 소요 시간: {risk_elapsed:.1f}초.",
+                kind="result",
+            ),
+            progress,
         )
         calculated_rows = _calculate_risk_rows(risk_rows)
         high_risk_rows = [row for row in calculated_rows if row.risk_score >= 9]
-        events.append(
-            engine_event(
-                "위험도 9 이상 항목을 선별했습니다.",
-                f"시스템 계산 결과 조치계획서 생성 대상은 {len(high_risk_rows)}건입니다.",
-            )
+        await _record_events(
+            events,
+            progress,
+            [
+                engine_event("risk-review-agent Sub Agent를 호출합니다.", "#3 초안이 입력 Excel 기준을 벗어나지 않았는지, 근거가 빠지지 않았는지 검토합니다.", kind="agent"),
+                engine_event("hazop_risk_review 스킬을 참조합니다.", "AI가 Node, 변수, Guideword를 새로 만들지 않았는지 확인합니다.", kind="skill"),
+                engine_event("calculate_hazop_risk Tool을 호출합니다.", f"시스템 코드가 빈도 * 강도로 위험도를 계산하고, 위험도 9 이상 {len(high_risk_rows)}건을 선별했습니다.", kind="tool"),
+                engine_event("risk-review-agent 검토를 완료했습니다.", "검토 후 조치계획서 작성 대상만 action-plan-agent로 넘깁니다.", kind="result"),
+                engine_event("action-plan-agent Sub Agent를 호출합니다.", "위험도 9 이상 항목만 받아 #4 조치계획서 초안을 작성합니다.", kind="agent"),
+                engine_event("hazop_action_plan 스킬을 참조합니다.", "개선권고사항, 조치 후 빈도/강도 후보, 담당부서와 근거 작성 기준을 적용합니다.", kind="skill"),
+            ],
         )
+        if high_risk_rows:
+            await _record_event(
+                events,
+                engine_event("모델 응답 대기 중입니다.", "action-plan-agent가 Azure OpenAI에 #4 조치계획서 초안 생성을 요청했습니다.", kind="tool"),
+                progress,
+            )
+        action_started_at = time.perf_counter()
         action_rows = await _generate_action_rows_with_deepagent(context, high_risk_rows)
-        events.append(
+        action_elapsed = time.perf_counter() - action_started_at
+        await _record_event(
+            events,
             engine_event(
                 "#4 조치계획서 Deepagent 초안을 생성했습니다.",
-                f"조치계획서 Row {len(action_rows)}건을 확보했습니다.",
-            )
+                f"조치계획서 Row {len(action_rows)}건을 확보했습니다. 소요 시간: {action_elapsed:.1f}초.",
+                kind="result",
+            ),
+            progress,
         )
         return HazopDraftResult(
             risk_rows=calculated_rows,
@@ -84,13 +128,16 @@ async def generate_hazop_draft(context: HazopDraftContext) -> HazopDraftResult:
         )
     except Exception as exc:
         fallback_reason = _describe_deepagent_exception(exc)
-        events.append(
+        await _record_event(
+            events,
             engine_event(
                 "Deepagent 실행 중 fallback으로 전환합니다.",
                 f"Deepagent 초안 생성이 완료되지 않아 PoC 내장 생성기를 사용합니다. 사유: {fallback_reason}",
-            )
+                kind="warning",
+            ),
+            progress,
         )
-        return _demo_result(context, events, fallback_reason)
+        return await _demo_result(context, events, fallback_reason, progress)
 
 
 async def _generate_risk_rows_with_deepagent(context: HazopDraftContext) -> list[RiskAssessmentRow]:
@@ -287,10 +334,46 @@ def _calculate_action_rows(rows: list[ActionPlanRow]) -> list[ActionPlanRow]:
     return calculated
 
 
-def _demo_result(context: HazopDraftContext, events: list, reason: str) -> HazopDraftResult:
+async def _demo_result(
+    context: HazopDraftContext,
+    events: list,
+    reason: str,
+    progress: ProgressCallback | None = None,
+) -> HazopDraftResult:
+    await _record_events(
+        events,
+        progress,
+        [
+            engine_event("risk-draft-agent Sub Agent를 호출합니다.", "Demo 모드에서도 #3 위험성평가 초안 작성 역할을 분리해 표시합니다.", kind="agent"),
+            engine_event("hazop_risk_draft 스킬을 참조합니다.", "쉽게 말하면 AI 모델 대신 코드에 넣어둔 PoC용 규칙으로 원인/결과/안전조치 후보를 만듭니다.", kind="skill"),
+            engine_event("frequency_estimation 스킬을 참조합니다.", "빈도 후보는 사고이력, 유사 HAZOP 문서, 일반 HAZOP 규칙 순서로 근거를 확인합니다.", kind="skill"),
+        ],
+    )
     risk_rows = _calculate_risk_rows(_generate_risk_rows_demo(context))
     high_risk_rows = [row for row in risk_rows if row.risk_score >= 9]
+    await _record_events(
+        events,
+        progress,
+        [
+            engine_event("risk-draft-agent 초안을 생성했습니다.", f"#3 위험성평가 Row {len(risk_rows)}건을 작성했습니다.", kind="result"),
+            engine_event("risk-review-agent Sub Agent를 호출합니다.", "#3 초안이 입력 Excel 기준을 벗어나지 않았는지 검토합니다.", kind="agent"),
+            engine_event("hazop_risk_review 스킬을 참조합니다.", "Node, 변수, Guideword가 업로드 Excel 기준과 일치하는지 확인합니다.", kind="skill"),
+            engine_event("calculate_hazop_risk Tool을 호출합니다.", f"시스템 코드가 빈도 * 강도로 위험도를 계산하고, 위험도 9 이상 {len(high_risk_rows)}건을 선별했습니다.", kind="tool"),
+            engine_event("risk-review-agent 검토를 완료했습니다.", "검토 후 조치계획서 작성 대상만 action-plan-agent로 넘깁니다.", kind="result"),
+            engine_event("action-plan-agent Sub Agent를 호출합니다.", "위험도 9 이상 항목만 받아 #4 조치계획서 초안을 작성합니다.", kind="agent"),
+            engine_event("hazop_action_plan 스킬을 참조합니다.", "개선권고사항, 조치 후 빈도/강도 후보, 근거 작성 기준을 적용합니다.", kind="skill"),
+        ],
+    )
     action_rows = _calculate_action_rows(_generate_action_rows_demo(high_risk_rows))
+    await _record_event(
+        events,
+        engine_event(
+            "action-plan-agent 초안을 생성했습니다.",
+            f"#4 조치계획서 Row {len(action_rows)}건을 작성했습니다.",
+            kind="result",
+        ),
+        progress,
+    )
     return HazopDraftResult(
         risk_rows=risk_rows,
         action_rows=action_rows,
@@ -298,6 +381,17 @@ def _demo_result(context: HazopDraftContext, events: list, reason: str) -> Hazop
         mode="demo",
         fallback_reason=reason,
     )
+
+
+async def _record_events(events: list, progress: ProgressCallback | None, new_events: list) -> None:
+    for event in new_events:
+        await _record_event(events, event, progress)
+
+
+async def _record_event(events: list, event: Any, progress: ProgressCallback | None) -> None:
+    events.append(event)
+    if progress:
+        await progress(event)
 
 
 def _generate_risk_rows_demo(context: HazopDraftContext) -> list[RiskAssessmentRow]:

@@ -19,7 +19,7 @@ from app.services.db import (
     save_result_meta,
     update_job_status,
 )
-from app.services.excel import read_nodes_from_excel
+from app.services.excel import read_input_preview_from_excel
 
 
 load_dotenv()
@@ -60,6 +60,7 @@ async def create_job(
     node_materials: str = Form(""),
     standard_hazop_link: str = Form(""),
     notes: str = Form(""),
+    incident_maintenance_history: str = Form(""),
 ) -> dict:
     """업로드 파일과 입력값을 임시 작업으로 저장합니다.
 
@@ -86,6 +87,7 @@ async def create_job(
         node_materials=node_materials,
         standard_hazop_link=standard_hazop_link,
         notes=notes,
+        incident_maintenance_history=incident_maintenance_history,
     )
     (job_dir / "input.json").write_text(input_data.model_dump_json(indent=2), encoding="utf-8")
     (job_dir / "excel_path.txt").write_text(str(excel_path), encoding="utf-8")
@@ -96,17 +98,17 @@ async def create_job(
 
 @app.post("/api/excel/nodes")
 async def preview_excel_nodes(file: UploadFile = File(...)) -> dict:
-    """업로드 Excel의 `#1 노드리스트`를 읽어 화면에 미리 보여줍니다.
+    """업로드 Excel의 `#1`, `#2`를 읽어 화면에 미리 보여줍니다.
 
-    쉽게 말하면, 사용자가 Excel 파일을 고르면 그 안의 Node 이름을 꺼내서
-    Node별 물질정보 입력칸을 자동으로 만들 수 있게 해주는 API입니다.
+    쉽게 말하면, 사용자가 Excel 파일을 고르면 그 안의 Node 이름과
+    변수/Guideword 조합을 꺼내서 Node List 표를 만들 수 있게 해주는 API입니다.
     """
 
     if not file.filename or not file.filename.lower().endswith(".xlsx"):
         raise HTTPException(status_code=400, detail="xlsx 파일만 업로드할 수 있습니다.")
 
     try:
-        nodes = read_nodes_from_excel(file.file)
+        nodes, guidewords = read_input_preview_from_excel(file.file)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -114,7 +116,16 @@ async def preview_excel_nodes(file: UploadFile = File(...)) -> dict:
         "nodes": [
             {"node_order": node.node_order, "node_name": node.node_name}
             for node in nodes
-        ]
+        ],
+        "guidewords": [
+            {
+                "node_order": item.node_order,
+                "node_name": item.node_name,
+                "parameter": item.parameter,
+                "guideword": item.guideword,
+            }
+            for item in guidewords
+        ],
     }
 
 
