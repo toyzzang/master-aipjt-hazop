@@ -7,16 +7,24 @@ from typing import Any
 from openai import AsyncAzureOpenAI, DefaultAsyncHttpxClient
 
 
+AZURE_OPENAI_REQUIRED_ENV = [
+    "AZURE_OPENAI_ENDPOINT",
+    "AZURE_OPENAI_API_KEY",
+    "AZURE_OPENAI_API_VERSION",
+    "AZURE_OPENAI_DEPLOYMENT",
+]
+
+
 def azure_openai_configured() -> bool:
     """Azure OpenAI 호출에 필요한 환경 변수가 모두 있는지 확인합니다."""
 
-    required = [
-        "AZURE_OPENAI_ENDPOINT",
-        "AZURE_OPENAI_API_KEY",
-        "AZURE_OPENAI_API_VERSION",
-        "AZURE_OPENAI_DEPLOYMENT",
-    ]
-    return all(os.getenv(name) for name in required)
+    return not missing_azure_openai_env()
+
+
+def missing_azure_openai_env() -> list[str]:
+    """값을 노출하지 않고 비어 있는 Azure OpenAI 설정 키 이름만 반환합니다."""
+
+    return [name for name in AZURE_OPENAI_REQUIRED_ENV if not os.getenv(name)]
 
 
 def connected_model_label() -> str:

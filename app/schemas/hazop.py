@@ -32,6 +32,7 @@ class HazopInput(BaseModel):
     node_materials: str = ""
     standard_hazop_link: str = ""
     notes: str = ""
+    incident_maintenance_history: str = ""
 
 
 class AgentEvidence(BaseModel):
