@@ -396,13 +396,25 @@ async def _record_event(events: list, event: Any, progress: ProgressCallback | N
 
 def _generate_risk_rows_demo(context: HazopDraftContext) -> list[RiskAssessmentRow]:
     joined_materials = " ".join(context.msds_context.keys()).lower()
+    joined_hazards = " ".join(
+        hazard for summary in context.msds_context.values() for hazard in summary.hazards
+    ).lower()
     rows: list[RiskAssessmentRow] = []
     for index, item in enumerate(context.guidewords, start=1):
         text = f"{item.node_name} {item.parameter} {item.guideword}".lower()
-        hazardous = any(token in joined_materials for token in ["silane", "hydrogen", "hf"])
+        material_keys = [key.lower() for key in context.msds_context]
+        water = bool(material_keys) and all("di water" in key or key == "water" for key in material_keys)
+        # "인화성/독성 위험은 낮음" 같은 문장에 위험 단어가 포함돼도
+        # DI Water를 고위험 물질로 오판하지 않도록 먼저 제외합니다.
+        hazardous = not water and any(
+            token in f"{joined_materials} {joined_hazards}"
+            for token in [
+                "silane", "hydrogen", "hf", "ammonia", "chlorine", "isopropyl",
+                "dimethyl carbonate", "독성", "부식성", "인화성", "폭발",
+            ]
+        )
         leak = any(token in text for token in ["leak", "containment", "누출"])
         purge = any(token in text for token in ["purge", "no"])
-        water = "di water" in joined_materials or "water" in joined_materials
 
         if hazardous and leak:
             frequency, severity = 3, 4

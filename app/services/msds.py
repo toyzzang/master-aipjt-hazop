@@ -34,6 +34,14 @@ class MsdsLookupResult:
     steps: list[MsdsLookupStep]
 
 
+@dataclass
+class KoshaLookupOutcome:
+    """KOSHA 조회값과 실패 이유를 함께 보관하는 내부 진단값입니다."""
+
+    summary: MsdsSummary | None
+    reason: str
+
+
 LOCAL_MSDS = {
     "di water": MsdsSummary(
         material="DI Water",
@@ -63,6 +71,42 @@ LOCAL_MSDS = {
         material="HF",
         hazards=["급성 독성 및 부식성", "피부 접촉 시 중대한 화학화상 가능", "흡입 노출 위험"],
         handling=["국소배기", "보호구", "누출 대응 키트", "비상샤워/세안설비"],
+        source="PoC 내장 MSDS 요약",
+    ),
+    "ammonia": MsdsSummary(
+        material="Ammonia",
+        hazards=["독성 및 부식성 가스", "누출 시 작업자 노출과 대피 위험", "가연성 혼합물 형성 가능"],
+        handling=["가스감지기와 긴급차단", "국소배기", "내화학 보호구", "물분무/제독 설비 점검"],
+        source="PoC 내장 MSDS 요약",
+    ),
+    "chlorine": MsdsSummary(
+        material="Chlorine",
+        hazards=["흡입 시 치명적일 수 있는 독성가스", "강한 산화성", "수분 접촉 시 부식성 물질 생성 가능"],
+        handling=["염소감지기와 긴급차단", "음압실 및 Scrubber", "공기호흡기", "누출 대응 격리"],
+        source="PoC 내장 MSDS 요약",
+    ),
+    "isopropyl alcohol": MsdsSummary(
+        material="Isopropyl alcohol",
+        hazards=["고인화성 액체 및 증기", "증기와 공기가 폭발성 혼합물 형성 가능", "눈 자극 및 고농도 흡입 위험"],
+        handling=["점화원 제거", "접지와 본딩", "방폭 환기", "밀폐 이송 및 누출 회수"],
+        source="PoC 내장 MSDS 요약",
+    ),
+    "lithium hexafluorophosphate": MsdsSummary(
+        material="Lithium hexafluorophosphate",
+        hazards=["수분과 반응해 부식성 분해물 생성 가능", "흡입·피부·눈 노출 위험"],
+        handling=["건조 분위기 유지", "내화학 보호구", "수분 유입 감시", "국소배기"],
+        source="PoC 내장 MSDS 요약",
+    ),
+    "ethylene carbonate": MsdsSummary(
+        material="Ethylene carbonate",
+        hazards=["가열 시 유해 증기와 화재 위험 검토 필요", "눈·피부 자극 가능"],
+        handling=["온도 관리", "보호구", "환기", "누출 회수"],
+        source="PoC 내장 MSDS 요약",
+    ),
+    "dimethyl carbonate": MsdsSummary(
+        material="Dimethyl carbonate",
+        hazards=["인화성 액체 및 증기", "증기 축적 시 화재·폭발 위험"],
+        handling=["점화원 제거", "접지와 본딩", "방폭 환기", "밀폐 보관"],
         source="PoC 내장 MSDS 요약",
     ),
 }
@@ -100,8 +144,9 @@ async def fetch_msds_summary_with_trace(material: str) -> MsdsLookupResult:
         )
     )
 
-    kosha_summary = await _fetch_kosha_msds_summary(material)
-    if kosha_summary:
+    kosha_outcome = await _fetch_kosha_msds_summary_with_reason(material)
+    if kosha_outcome.summary:
+        kosha_summary = kosha_outcome.summary
         steps.append(
             MsdsLookupStep(
                 title="KOSHA MSDS 검색 결과를 찾았습니다.",
@@ -113,7 +158,7 @@ async def fetch_msds_summary_with_trace(material: str) -> MsdsLookupResult:
     steps.append(
         MsdsLookupStep(
             title="KOSHA MSDS에서 확정 가능한 결과를 찾지 못했습니다.",
-            detail="검색 결과가 없거나, HF처럼 짧은 물질명이 다른 물질로 오매칭될 위험이 있어 KOSHA 결과를 사용하지 않습니다.",
+            detail=kosha_outcome.reason,
         )
     )
 
@@ -155,6 +200,12 @@ async def _fetch_kosha_msds_summary(material: str) -> MsdsSummary | None:
     HAZOP 관점에서는 일반 웹 검색보다 출처가 명확해서 더 좋은 방식입니다.
     """
 
+    return (await _fetch_kosha_msds_summary_with_reason(material)).summary
+
+
+async def _fetch_kosha_msds_summary_with_reason(material: str) -> KoshaLookupOutcome:
+    """KOSHA 검색을 수행하고 화면에 표시할 성공/실패 이유도 반환합니다."""
+
     base_url = os.getenv("KOSHA_MSDS_BASE_URL", "https://msds.kosha.or.kr")
     search_url = f"{base_url}/MSDSInfo/kcic/msdssearchMsds.do"
     detail_url = f"{base_url}/MSDSInfo/kcic/msdsdetail.do"
@@ -181,7 +232,13 @@ async def _fetch_kosha_msds_summary(material: str) -> MsdsSummary | None:
             search_response.raise_for_status()
             chem_id, chem_name = _first_kosha_result(search_response.text, material)
             if not chem_id:
-                return None
+                return KoshaLookupOutcome(
+                    summary=None,
+                    reason=(
+                        f"'{material}' 검색 결과에서 정확히 선택할 수 있는 물질을 찾지 못했습니다. "
+                        "특히 3글자 이하 검색어는 다른 물질 오매칭을 막기 위해 정확히 같은 이름만 허용합니다."
+                    ),
+                )
 
             detail_response = await client.post(
                 detail_url,
@@ -197,19 +254,28 @@ async def _fetch_kosha_msds_summary(material: str) -> MsdsSummary | None:
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
             detail_response.raise_for_status()
-    except Exception:
-        return None
+    except Exception as exc:
+        return KoshaLookupOutcome(
+            summary=None,
+            reason=f"KOSHA 사이트 연결 또는 응답 처리에 실패했습니다. 오류 종류: {type(exc).__name__}",
+        )
 
     hazards = _extract_kosha_hazards(detail_response.text)
     handling = _extract_kosha_handling(detail_response.text)
     if not hazards and not handling:
-        return None
+        return KoshaLookupOutcome(
+            summary=None,
+            reason=f"KOSHA에서 '{chem_name or material}' 상세 페이지를 열었지만 현재 파서가 읽을 수 있는 유해성/취급 문구가 없었습니다.",
+        )
 
-    return MsdsSummary(
-        material=chem_name or material,
-        hazards=hazards or ["KOSHA 상세 페이지에서 유해성 문구를 찾지 못해 담당자 확인 필요"],
-        handling=handling or ["KOSHA 상세 페이지에서 취급/누출 대응 문구를 찾지 못해 담당자 확인 필요"],
-        source=f"KOSHA MSDS 검색 chem_id={chem_id}",
+    return KoshaLookupOutcome(
+        summary=MsdsSummary(
+            material=chem_name or material,
+            hazards=hazards or ["KOSHA 상세 페이지에서 유해성 문구를 찾지 못해 담당자 확인 필요"],
+            handling=handling or ["KOSHA 상세 페이지에서 취급/누출 대응 문구를 찾지 못해 담당자 확인 필요"],
+            source=f"KOSHA MSDS 검색 chem_id={chem_id}",
+        ),
+        reason=f"KOSHA에서 chem_id={chem_id} 상세정보를 확인했습니다.",
     )
 
 
@@ -248,6 +314,18 @@ def _canonical_material_name(value: str) -> str:
         return "Nitrogen"
     if "di water" in lowered or "diw" in lowered:
         return "DI Water"
+    if "ammonia" in lowered or "암모니아" in lowered:
+        return "Ammonia"
+    if "chlorine" in lowered or "염소" in lowered:
+        return "Chlorine"
+    if "isopropyl alcohol" in lowered or lowered == "ipa" or "이소프로필 알코올" in lowered:
+        return "Isopropyl alcohol"
+    if "lithium hexafluorophosphate" in lowered or "lipf6" in lowered:
+        return "Lithium hexafluorophosphate"
+    if "ethylene carbonate" in lowered:
+        return "Ethylene carbonate"
+    if "dimethyl carbonate" in lowered:
+        return "Dimethyl carbonate"
     return value.strip()
 
 
