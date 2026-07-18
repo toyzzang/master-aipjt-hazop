@@ -569,11 +569,32 @@ textarea {
   padding: 24px;
 }
 
-.result-progress .progress-ring {
-  width: 34px;
-  height: 34px;
-  border-width: 3px;
+.result-wait-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 58px;
+  height: 44px;
   flex: 0 0 auto;
+}
+
+.result-wait-indicator span {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: #55677a;
+  opacity: 0.18;
+  transform: scale(0.78);
+  animation: result-wait-fade 3.2s ease-in-out infinite;
+}
+
+.result-wait-indicator span:nth-child(2) {
+  animation-delay: 0.45s;
+}
+
+.result-wait-indicator span:nth-child(3) {
+  animation-delay: 0.9s;
 }
 
 .result-progress strong {
@@ -650,6 +671,28 @@ td {
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@keyframes result-wait-fade {
+  0%,
+  100% {
+    opacity: 0.18;
+    transform: scale(0.78);
+    box-shadow: 0 0 0 rgba(85, 103, 122, 0);
+  }
+  50% {
+    opacity: 0.9;
+    transform: scale(1);
+    box-shadow: 0 0 12px rgba(85, 103, 122, 0.34);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .result-wait-indicator span {
+    animation: none;
+    opacity: 0.65;
+    transform: none;
   }
 }
 

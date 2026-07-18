@@ -189,8 +189,8 @@ function App() {
   }
 
   function appendLog(event: AgentEvent) {
-    const title = event.title || event.message || "Agent 로그";
-    const detail = event.detail || "";
+    const title = describeAgentRoles(event.title || event.message || "Agent 로그");
+    const detail = describeAgentRoles(event.detail || "");
     const kind = event.kind || "agent";
     const loading = Boolean(event.loading) || title === "Deepagent가 초안을 생성 중입니다.";
     const progressLog = title === "Deepagent가 초안을 생성 중입니다.";
@@ -359,8 +359,12 @@ function App() {
             </div>
             {!result ? (
               isRunning ? (
-                <div className="result-progress">
-                  <div className="progress-ring" />
+                <div className="result-progress" role="status" aria-live="polite" aria-busy="true">
+                  <div className="result-wait-indicator" aria-hidden="true">
+                    <span />
+                    <span />
+                    <span />
+                  </div>
                   <div>
                     <strong>{generationStage.title}</strong>
                     <p>{generationStage.detail}</p>
@@ -530,6 +534,19 @@ function logKindLabel(kind: LogKind) {
     warning: "주의",
     error: "Error",
   }[kind];
+}
+
+function describeAgentRoles(value: string) {
+  const roles: Array<[string, string]> = [
+    ["risk-draft-agent", "risk-draft-agent (위험성평가 초안 작성)"],
+    ["risk-review-agent", "risk-review-agent (위험도 계산·근거 검토)"],
+    ["action-plan-agent", "action-plan-agent (고위험 항목 조치계획 작성)"],
+  ];
+
+  return roles.reduce((text, [agentName, label]) => {
+    if (text.includes(label)) return text;
+    return text.replaceAll(agentName, label);
+  }, value);
 }
 
 function formatCell(value: unknown) {

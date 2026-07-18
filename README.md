@@ -102,9 +102,23 @@ python scripts/create_sample_excels.py
 - `samples/HAZOP_CleanTech_CT-DIW-100.xlsx`
 - `samples/HAZOP_ASM_Epsilon3200.xlsx`
 - `samples/HAZOP_ThermoVac_TV-ETCH-200.xlsx`
+- `samples/HAZOP_ColdChain_NH3-Refrigeration.xlsx`
+- `samples/HAZOP_Solvent_IPA-Supply.xlsx`
+- `samples/HAZOP_Waterworks_Chlorine-Dosing.xlsx`
+- `samples/HAZOP_Battery_Electrolyte-Mixing.xlsx`
+- `samples/HAZOP_Integrated_MultiUtility-Complex.xlsx`
 
 각 샘플은 `#1`, `#2`만 데이터가 있고 `#3`, `#4`는 헤더만 있는 빈 Sheet입니다.
 `samples/~$...xlsx`처럼 `~$`로 시작하는 파일은 Excel이 파일을 열 때 만드는 임시 잠금 파일이므로 업로드하지 않습니다.
+
+새 샘플은 냉동설비(Ammonia), 용제공급(Isopropyl alcohol), 수처리(Chlorine),
+배터리 전해액, 다중 Utility 통합공정을 다룹니다. 특히
+`HAZOP_Integrated_MultiUtility-Complex.xlsx`는 10개 Node와 30개가 넘는 평가 조합이 있어
+여러 물질과 설비가 함께 있는 긴 Agent 실행을 확인하기 좋습니다.
+
+KOSHA 실검색 성공을 가장 쉽게 확인하려면 물질명에 `Hydrogen`을 입력합니다.
+정상 연결 시 Agent 로그에 `KOSHA MSDS 검색 결과를 찾았습니다`와 `chem_id=000557` 같은 출처가 표시됩니다.
+외부망 또는 DNS가 막혀 있으면 이제 `ConnectError`처럼 실패 종류가 로그에 표시되고 내장 요약으로 전환됩니다.
 
 ## 서버 실행
 
@@ -190,12 +204,17 @@ curl http://127.0.0.1:8000/api/jobs
 python scripts/create_sample_excels.py
 ```
 
-아래 파일 3개가 생기면 됩니다.
+아래 기본 3개와 신규 5개, 총 8개가 생기면 됩니다.
 
 ```text
 samples/HAZOP_CleanTech_CT-DIW-100.xlsx
 samples/HAZOP_ASM_Epsilon3200.xlsx
 samples/HAZOP_ThermoVac_TV-ETCH-200.xlsx
+samples/HAZOP_ColdChain_NH3-Refrigeration.xlsx
+samples/HAZOP_Solvent_IPA-Supply.xlsx
+samples/HAZOP_Waterworks_Chlorine-Dosing.xlsx
+samples/HAZOP_Battery_Electrolyte-Mixing.xlsx
+samples/HAZOP_Integrated_MultiUtility-Complex.xlsx
 ```
 
 각 파일에서 `#3 위험성평가`, `#4 조치계획서`는 헤더만 있고 데이터 행은 비어 있어야 합니다.
