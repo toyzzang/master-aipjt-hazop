@@ -30,7 +30,22 @@ type AgentEvent = {
   phase?: "start" | "progress" | "finish";
 };
 
-type LogKind = "system" | "workflow" | "agent" | "skill" | "tool" | "validation" | "result" | "warning" | "error";
+type LogKind =
+  | "system"
+  | "workflow"
+  | "planning"
+  | "plan-candidate"
+  | "plan-evaluation"
+  | "plan-selected"
+  | "agent"
+  | "skill"
+  | "tool"
+  | "validation"
+  | "self-correction"
+  | "replanning"
+  | "result"
+  | "warning"
+  | "error";
 
 type LogGroup = {
   id: string;
@@ -57,6 +72,7 @@ type HazopResult = {
   risk_rows: RiskRow[];
   action_rows: ActionRow[];
   review_findings: ReviewFinding[];
+  execution_plan?: Record<string, unknown>;
   output_excel?: string;
 };
 
@@ -211,6 +227,7 @@ function App() {
         risk_rows: data.risk_rows || [],
         action_rows: data.action_rows || [],
         review_findings: data.review_findings || [],
+        execution_plan: data.execution_plan,
         output_excel: data.output_excel,
       });
       setDownloadPath(data.output_excel || "");
@@ -255,13 +272,19 @@ function App() {
         const stoppedChildren = finishing
           ? target.children.map((child) => ({ ...child, loading: false }))
           : [...target.children];
-        const duplicateIndex = stoppedChildren.findIndex(
-          (child) => child.title === title && child.detail === detail,
+        // Planning은 '수립 중 → 수립 완료'라는 하나의 상태이므로 같은 블록을
+        // 갱신합니다. Skill/Tool의 준비와 실제 적용 결과는 별도 사실이므로
+        // 새 블록으로 추가하여 실행 증거가 사라지지 않게 합니다.
+        const singletonKind = kind === "planning";
+        const duplicateIndex = stoppedChildren.findIndex((child) =>
+          singletonKind ? child.kind === kind : child.title === title && child.detail === detail,
         );
 
         if (duplicateIndex >= 0) {
           stoppedChildren[duplicateIndex] = {
             ...stoppedChildren[duplicateIndex],
+            title,
+            detail,
             kind,
             loading: loading && !finishing,
           };
@@ -345,8 +368,8 @@ function App() {
       <section className="workspace">
         <header className="hero">
           <p className="eyebrow">HAZOP Draft Workspace</p>
-          <h1>HAZOP AI Agent PoC</h1>
-          <p>업로드 Excel의 #1 노드리스트와 #2 가이드워드만 기준으로 #3/#4 초안을 생성합니다.</p>
+          <h1>공정위험평가서(HAZOP) 초안 작성 AI Agent</h1>
+          <p>업로드 Excel의 #1 노드리스트와 #2 가이드워드를 기준으로 #3/#4 초안을 생성합니다.</p>
         </header>
 
         <form className="work-grid" onSubmit={handleSubmit}>
@@ -580,7 +603,7 @@ function ResultTable({ title, rows, emptyText }: { title: string; rows: RiskRow[
               <tr key={rowIndex}>
                 {headers.map((header) => (
                   <td className={columnClassName(header)} key={header}>
-                    {formatCell(row[header])}
+                    {formatCell(row[header], header)}
                   </td>
                 ))}
               </tr>
@@ -676,10 +699,16 @@ function logKindLabel(kind: LogKind) {
   return {
     system: "시스템",
     workflow: "Workflow",
+    planning: "Planning",
+    "plan-candidate": "Plan 후보",
+    "plan-evaluation": "Plan 평가",
+    "plan-selected": "Plan 선택",
     agent: "Agent",
     skill: "Skill",
     tool: "Tool",
     validation: "검증",
+    "self-correction": "Self-Correction",
+    replanning: "Replanning",
     result: "Result",
     warning: "주의",
     error: "Error",
@@ -699,7 +728,10 @@ function describeAgentRoles(value: string) {
   }, value);
 }
 
-function formatCell(value: unknown) {
+function formatCell(value: unknown, header?: string): React.ReactNode {
+  if (header === "requires_confirmation" && value === true) {
+    return <strong className="confirmation-required">True</strong>;
+  }
   if (Array.isArray(value)) {
     return value
       .map((item) => {

@@ -467,6 +467,96 @@ textarea {
   text-transform: uppercase;
 }
 
+.log-kind,
+.child-log > span {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: #eef2f6;
+  padding: 5px 9px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.log-card.kind-planning .log-kind,
+.child-log.kind-planning > span,
+.log-card.kind-plan-candidate .log-kind,
+.log-card.kind-plan-evaluation .log-kind {
+  background: #e4f4ed;
+  color: #176149;
+}
+
+.log-card.kind-plan-selected .log-kind {
+  background: #e4f4ed;
+  color: #176149;
+}
+
+.log-card.kind-self-correction .log-kind,
+.child-log.kind-self-correction > span {
+  background: #e4f4ed;
+  color: #176149;
+}
+
+.child-log.kind-validation > span {
+  background: #e8e9eb;
+  color: #17191c;
+}
+
+.log-card.kind-system .log-kind,
+.child-log.kind-system > span {
+  background: #edf1f5;
+  color: #4d5b68;
+}
+
+.log-card.kind-workflow .log-kind,
+.child-log.kind-workflow > span {
+  background: #e4f3f7;
+  color: #176278;
+}
+
+.log-card.kind-agent .log-kind,
+.child-log.kind-agent > span {
+  background: #e8e9eb;
+  color: #17191c;
+}
+
+.log-card.kind-skill .log-kind,
+.child-log.kind-skill > span {
+  background: #fff4c7;
+  color: #765500;
+}
+
+.log-card.kind-tool .log-kind,
+.child-log.kind-tool > span {
+  background: #fff4c7;
+  color: #765500;
+}
+
+.log-card.kind-validation .log-kind {
+  background: #e8e9eb;
+  color: #17191c;
+}
+
+.log-card.kind-result .log-kind,
+.child-log.kind-result > span {
+  background: #e8e9eb;
+  color: #17191c;
+}
+
+.log-card.kind-warning .log-kind,
+.child-log.kind-warning > span {
+  background: #fff0d8;
+  color: #8a4b00;
+}
+
+.log-card.kind-error .log-kind,
+.child-log.kind-error > span {
+  background: #fde8ec;
+  color: #a31d38;
+}
+
 .log-step {
   color: #9aa5b1;
   font-weight: 800;
@@ -508,14 +598,14 @@ textarea {
   display: grid;
   gap: 8px;
   margin-top: 12px;
-  padding-left: 14px;
-  border-left: 1px solid var(--line);
+  padding-left: 0;
 }
 
 .child-log {
   display: grid;
-  grid-template-columns: 46px 1fr;
+  grid-template-columns: max-content minmax(0, 1fr);
   gap: 10px;
+  align-items: start;
   border: 1px solid #edf1f5;
   border-radius: 8px;
   background: #ffffff;
@@ -524,8 +614,9 @@ textarea {
 
 .child-log > span {
   display: inline-flex;
-  align-items: flex-start;
-  padding-top: 2px;
+  align-items: center;
+  align-self: start;
+  padding: 5px 9px;
 }
 
 .child-log > span i {
@@ -540,6 +631,11 @@ textarea {
 .child-log strong {
   color: var(--ink);
   font-size: 13px;
+}
+
+.confirmation-required {
+  color: #c52233;
+  font-weight: 900;
 }
 
 .result-panel {

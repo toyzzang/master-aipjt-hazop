@@ -63,7 +63,7 @@ class RiskCriteria(BaseModel):
 class ReviewFinding(BaseModel):
     """독립 검토 Agent가 무엇을 발견하고 어떻게 반영했는지 남기는 기록입니다."""
 
-    risk_assessment_no: int | None = Field(default=None, ge=1)
+    risk_assessment_no: int | Literal["전체"] = "전체"
     category: str = Field(..., min_length=1)
     message: str = Field(..., min_length=1)
     resolution: str = Field(..., min_length=1)
@@ -114,4 +114,5 @@ class HazopResult(BaseModel):
     risk_rows: list[RiskAssessmentRow]
     action_rows: list[ActionPlanRow]
     review_findings: list[ReviewFinding] = Field(default_factory=list)
+    execution_plan: dict | None = None
     output_excel: str | None = None

@@ -14,6 +14,43 @@ from app.schemas.hazop import (
 from app.services.msds import MsdsSummary
 
 
+class HazopPlanStep(BaseModel):
+    """안전하게 고정된 HAZOP Workflow의 한 단계입니다."""
+
+    number: int
+    name: str
+    mode: str
+    objective: str
+    success_condition: str
+
+
+class HazopPlanCandidate(BaseModel):
+    """고정 Workflow 안에서 비교하는 제한된 근거 활용 전략입니다."""
+
+    candidate_id: str
+    name: str
+    description: str
+    reason: str
+    observed_conditions: list[str]
+    limitations: list[str]
+    evidence_priority: list[str]
+    review_focus: list[str]
+    tool_policy: dict[str, str]
+
+
+class HazopExecutionPlan(BaseModel):
+    """Agent들이 실제로 공유하는 구조화 실행계획입니다."""
+
+    plan_id: str
+    steps: list[HazopPlanStep]
+    success_conditions: list[str]
+    candidates: list[HazopPlanCandidate]
+    selected_candidate_id: str
+
+    def selected_candidate(self) -> HazopPlanCandidate:
+        return next(item for item in self.candidates if item.candidate_id == self.selected_candidate_id)
+
+
 class EngineEvent(BaseModel):
     """HAZOP Engine 내부 진행 상황을 화면 로그로 바꾸기 전의 구조화 이벤트입니다."""
 
@@ -63,6 +100,7 @@ class HazopDraftContext(BaseModel):
     msds_context: dict[str, MsdsSummary] = Field(default_factory=dict)
     incident_history_context: IncidentHistoryContext = Field(default_factory=IncidentHistoryContext)
     standard_hazop_context: StandardHazopContext = Field(default_factory=StandardHazopContext)
+    execution_plan: HazopExecutionPlan | None = None
     events: list[EngineEvent] = Field(default_factory=list)
 
 
@@ -72,6 +110,7 @@ class HazopDraftResult(BaseModel):
     risk_rows: list[RiskAssessmentRow]
     action_rows: list[ActionPlanRow]
     review_findings: list[ReviewFinding] = Field(default_factory=list)
+    execution_plan: HazopExecutionPlan | None = None
     events: list[EngineEvent] = Field(default_factory=list)
     mode: str = "demo"
     fallback_reason: str = ""

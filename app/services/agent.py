@@ -221,6 +221,7 @@ async def run_hazop_agent(
         risk_rows=calculated_rows,
         action_rows=action_rows,
         review_findings=draft_result.review_findings,
+        execution_plan=draft_result.execution_plan.model_dump() if draft_result.execution_plan else None,
         output_excel=str(output_excel),
     )
     result_path = workdir / "result.json"
@@ -707,7 +708,16 @@ async def _progress_log_delay(engine_event) -> None:
     화면 이벤트만 불규칙한 간격으로 내보내므로 LLM 실행 시간을 인위적으로 늘리지 않습니다.
     """
 
-    if not engine_event.agent_id or engine_event.phase not in {"start", "progress"}:
+    agent_progress = bool(engine_event.agent_id) and engine_event.phase in {"start", "progress"}
+    high_level_reasoning = engine_event.kind in {
+        "planning",
+        "plan-candidate",
+        "plan-evaluation",
+        "plan-selected",
+        "self-correction",
+        "replanning",
+    }
+    if not agent_progress and not high_level_reasoning:
         return
 
     minimum = max(0.0, float(os.getenv("AGENT_PROGRESS_LOG_MIN_SECONDS", "0.8")))

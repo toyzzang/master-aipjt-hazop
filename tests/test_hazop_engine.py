@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from app.hazop_engine.agents.deepagent_factory import _filesystem_permissions, _skill_paths
 from app.hazop_engine.context import AgentTrace, EngineEvent, HazopDraftContext
+from app.hazop_engine.planning import build_execution_plan, plan_prompt
 from app.hazop_engine.tools.validation_tools import parse_risk_rows, validate_and_calculate_risk_rows
 from app.hazop_engine.workflow import _describe_deepagent_exception, generate_hazop_draft
 from app.schemas.hazop import (
@@ -91,6 +92,73 @@ def test_generate_hazop_draft_demo_fallback(monkeypatch):
     assert "risk-draft-agent demo fallback을 실행합니다." in titles
     assert "risk-review-agent AI 의미 검토를 실행하지 못했습니다." in titles
     assert "action-plan-agent demo fallback을 실행합니다." in titles
+
+
+def test_plan_compares_limited_strategies_and_applies_selected_strategy():
+    context = HazopDraftContext(
+        input_data=HazopInput(
+            maker="ASM",
+            model="Epsilon3200",
+            materials="Silane",
+            standard_hazop_link="STD-SILANE-001",
+            incident_maintenance_history="최근 1년 누출 경보 1회",
+        ),
+        nodes=[NodeRow(node_order=1, node_name="Gas Cabinet")],
+        guidewords=[GuidewordRow(node_order=1, node_name="Gas Cabinet", parameter="Containment", guideword="Leak")],
+        msds_context={
+            "silane": MsdsSummary(
+                material="Silane",
+                hazards=["공기 중 자연발화 가능"],
+                handling=["긴급차단밸브"],
+                source="test",
+            )
+        },
+    )
+
+    plan = build_execution_plan(context)
+    context.execution_plan = plan
+
+    assert len(plan.steps) == 5
+    assert [candidate.candidate_id for candidate in plan.candidates] == ["A", "B", "C"]
+    assert plan.selected_candidate_id == "A"
+    assert "고위험 물질 신호 발견" in plan.selected_candidate().observed_conditions
+    assert not hasattr(plan.selected_candidate(), "score")
+    prompt = plan_prompt(context)
+    assert plan.plan_id in prompt
+    assert "MSDS 우선 + 사고이력 보완" in prompt
+    assert "근거 우선순위: MSDS → 사용자 사고·정비 이력 → 표준 HAZOP" in prompt
+    assert "lookup_incident_history" in prompt
+
+
+def test_plan_selection_changes_with_available_evidence():
+    common = {
+        "nodes": [NodeRow(node_order=1, node_name="DI Water 공급 탱크")],
+        "guidewords": [GuidewordRow(node_order=1, node_name="DI Water 공급 탱크", parameter="Flow", guideword="No")],
+        "msds_context": {
+            "water": MsdsSummary(material="DI Water", hazards=["고유해성 낮음"], handling=["누수 관리"], source="test")
+        },
+    }
+    history_context = HazopDraftContext(
+        input_data=HazopInput(
+            maker="CleanTech",
+            model="CT-DIW-100",
+            materials="DI Water",
+            incident_maintenance_history="최근 1년 펌프 정지 3회",
+        ),
+        **common,
+    )
+    standard_context = HazopDraftContext(
+        input_data=HazopInput(
+            maker="CleanTech",
+            model="CT-DIW-100",
+            materials="DI Water",
+            standard_hazop_link="STD-DIW-001",
+        ),
+        **common,
+    )
+
+    assert build_execution_plan(history_context).selected_candidate_id == "B"
+    assert build_execution_plan(standard_context).selected_candidate_id == "C"
 
 
 def test_describe_deepagent_connection_error(monkeypatch):
@@ -224,6 +292,8 @@ def test_independent_review_result_is_reflected_before_action_plan(monkeypatch):
 
     async def fake_draft(_context, _events=None, _progress=None):
         calls.append("draft")
+        assert _context.execution_plan is not None
+        assert len(_context.execution_plan.steps) == 5
         return [_risk_row(severity=2)], []
 
     async def fake_review(_context, checked_rows, _events=None, _progress=None):
@@ -291,38 +361,31 @@ def test_independent_review_result_is_reflected_before_action_plan(monkeypatch):
         assert "progress" in phases
         assert phases[-1] == "finish"
         assert sum(
-            event.title == "모델 응답 대기 중입니다." and event.agent_id == agent_id
+            event.title == "Planning: DeepAgent가 실행계획을 수립하는 중입니다."
+            and event.agent_id == agent_id
             for event in result.events
         ) == 1
 
     titles = [event.title for event in result.events]
     assert titles[0] == "risk-draft-agent (위험성평가 초안 작성) Agent를 실행합니다."
+    assert result.execution_plan is not None
+    assert not any(title.startswith("Plan ") for title in titles)
     assert "Deepagent HAZOP Engine을 준비했습니다." not in titles
-    assert "hazop_risk_draft 스킬을 실행 기준으로 등록합니다." in titles
-    assert "frequency_estimation 스킬을 실행 기준으로 등록합니다." in titles
-    assert "hazop_risk_review 스킬을 실행 기준으로 등록합니다." in titles
-    assert "standard_hazop_comparison 스킬을 실행 기준으로 등록합니다." in titles
-    assert "hazop_action_plan 스킬을 실행 기준으로 등록합니다." in titles
-    assert "위험성평가 작성 Context를 구성합니다." in titles
-    assert "lookup_msds_detail Tool을 연결합니다." in titles
-    assert "위험도 검토 Context를 구성합니다." in titles
-    assert "조치계획 작성 Context를 구성합니다." in titles
+    assert not any("스킬을 실행 기준으로 등록합니다." in title for title in titles)
+    assert not any("Context를 구성합니다." in title for title in titles)
+    assert not any(title.endswith("Tool을 연결합니다.") for title in titles)
     assert not any("read_file" in f"{event.title} {event.detail}" for event in result.events)
-    risk_titles = [event.title for event in result.events if event.agent_id == "risk-draft-agent"]
-    assert risk_titles.index("hazop_risk_draft 스킬을 실행 기준으로 등록합니다.") < risk_titles.index(
-        "lookup_msds_detail Tool을 연결합니다."
-    )
-    assert risk_titles.index("lookup_standard_hazop Tool을 연결합니다.") < risk_titles.index(
-        "위험성평가 작성 Context를 구성합니다."
-    )
-    assert risk_titles.index("위험성평가 작성 Context를 구성합니다.") < risk_titles.index(
-        "모델 응답 대기 중입니다."
-    )
     review_summaries = [
-        event for event in result.events if event.title == "초안 검토 및 보완 결과를 요약했습니다."
+        event for event in result.events if event.title == "초안 검토 및 보완 결과 · 담당자 확인 필요 1건"
     ]
     assert len(review_summaries) == 1
     assert review_summaries[0].detail == "총 1건을 보완했습니다. 담당자 확인이 필요한 항목은 1건입니다."
+    correction_summary = next(
+        event for event in result.events if event.title == "Self-Correction: 독립 검토와 수정 반영을 완료했습니다."
+    )
+    assert "수정 1건" in correction_summary.detail
+    assert "조치계획 대상 변경 1건" in correction_summary.detail
+    assert all(finding.risk_assessment_no != "전체" for finding in result.review_findings)
     assert not any("검토 의견:" in event.title for event in result.events)
 
 
@@ -381,7 +444,8 @@ def test_draft_review_and_action_use_separate_llm_agents_with_lookup_tools(monke
     monkeypatch.setattr(workflow, "create_hazop_deep_agent", fake_create)
 
     async def run_stages():
-        drafted, _draft_traces = await workflow._generate_risk_rows_with_deepagent(context)
+        drafted, draft_traces = await workflow._generate_risk_rows_with_deepagent(context)
+        assert any(trace.kind == "planning" and trace.success for trace in draft_traces)
         reviewed, _findings, _review_traces = await workflow._review_risk_rows_with_deepagent(context, drafted)
         await workflow._generate_action_rows_with_deepagent(context, reviewed)
 
@@ -412,9 +476,8 @@ def test_skill_read_trace_is_shown_as_summary_without_internal_path():
         )
     )
 
-    assert len(recorded) == 2
-    assert recorded[0].title == "필수 Skill 적용을 확인했습니다."
-    assert recorded[1].title == "lookup_msds_detail Agent Tool 호출 성공"
+    assert len(recorded) == 1
+    assert recorded[0].title == "Tool 실행 결과를 확인했습니다."
     assert not any("read_file" in f"{event.title} {event.detail}" for event in recorded)
 
 
@@ -515,9 +578,14 @@ def test_agent_progress_log_delay_uses_configured_random_range(monkeypatch):
             )
         )
     )
+    asyncio.run(
+        service_agent._progress_log_delay(
+            EngineEvent(title="Planning", detail="test", kind="planning")
+        )
+    )
     asyncio.run(service_agent._progress_log_delay(EngineEvent(title="시스템 검증", detail="test")))
 
-    assert sleeps == [1.4]
+    assert sleeps == [1.4, 1.4]
 
 
 def _risk_row(*, severity: int) -> RiskAssessmentRow:
@@ -566,8 +634,20 @@ def _successful_skill_messages(skills: list[str]) -> list[dict]:
         }
         for index, skill in enumerate(skills)
     ]
+    planning_call = {
+        "id": "call-planning",
+        "name": "write_todos",
+        "args": {
+            "todos": [
+                {"content": "입력 조합을 확인한다", "status": "completed"},
+                {"content": "근거 우선순위를 적용한다", "status": "completed"},
+                {"content": "위험성평가 초안을 작성한다", "status": "completed"},
+            ]
+        },
+    }
     return [
-        {"tool_calls": calls},
+        {"tool_calls": [planning_call, *calls]},
+        {"tool_call_id": planning_call["id"], "status": "success", "content": "todo list updated"},
         *[
             {"tool_call_id": call["id"], "status": "success", "content": "skill content"}
             for call in calls
