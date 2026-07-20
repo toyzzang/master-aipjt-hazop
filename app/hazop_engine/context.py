@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from app.schemas.hazop import ActionPlanRow, GuidewordRow, HazopInput, NodeRow, RiskAssessmentRow
+from app.schemas.hazop import (
+    ActionPlanRow,
+    GuidewordRow,
+    HazopInput,
+    NodeRow,
+    ReviewFinding,
+    RiskAssessmentRow,
+    RiskCriteria,
+)
 from app.services.msds import MsdsSummary
 
 
@@ -12,6 +20,18 @@ class EngineEvent(BaseModel):
     title: str
     detail: str
     kind: str = "agent"
+    agent_id: str | None = None
+    phase: str | None = None
+    loading: bool = False
+
+
+class AgentTrace(BaseModel):
+    """DeepAgents 반환 메시지에서 확인한 실제 Skill/Tool 호출 기록입니다."""
+
+    name: str
+    kind: str
+    success: bool
+    detail: str = ""
 
 
 class IncidentHistoryContext(BaseModel):
@@ -39,6 +59,7 @@ class HazopDraftContext(BaseModel):
     input_data: HazopInput
     nodes: list[NodeRow]
     guidewords: list[GuidewordRow]
+    risk_criteria: RiskCriteria | None = None
     msds_context: dict[str, MsdsSummary] = Field(default_factory=dict)
     incident_history_context: IncidentHistoryContext = Field(default_factory=IncidentHistoryContext)
     standard_hazop_context: StandardHazopContext = Field(default_factory=StandardHazopContext)
@@ -50,6 +71,7 @@ class HazopDraftResult(BaseModel):
 
     risk_rows: list[RiskAssessmentRow]
     action_rows: list[ActionPlanRow]
+    review_findings: list[ReviewFinding] = Field(default_factory=list)
     events: list[EngineEvent] = Field(default_factory=list)
     mode: str = "demo"
     fallback_reason: str = ""

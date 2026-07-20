@@ -7,7 +7,7 @@ from openpyxl import load_workbook
 from app.hazop_engine.context import HazopDraftContext
 from app.hazop_engine.workflow import generate_hazop_draft
 from app.schemas.hazop import HazopInput
-from app.services.excel import ACTION_SHEET, RISK_SHEET, export_result_excel, validate_and_parse_excel
+from app.services.excel import ACTION_SHEET, RISK_SHEET, export_result_excel, validate_and_parse_excel_with_criteria
 from app.services.msds import MsdsSummary
 
 
@@ -23,16 +23,20 @@ def test_hazop_engine_reusable_scenarios(monkeypatch, tmp_path):
 
     for scenario in scenarios:
         sample_excel = BASE_DIR / scenario["sample_excel"]
-        nodes, guidewords = validate_and_parse_excel(sample_excel)
+        nodes, guidewords, risk_criteria = validate_and_parse_excel_with_criteria(sample_excel)
         expected = scenario["expected"]
 
         assert len(nodes) == expected["node_count"], scenario["id"]
         assert len(guidewords) == expected["guideword_count"], scenario["id"]
+        assert len(risk_criteria.items) == 15, scenario["id"]
+        assert risk_criteria.source == "업로드 Excel/위험도기준", scenario["id"]
+        assert not risk_criteria.requires_confirmation, scenario["id"]
 
         context = HazopDraftContext(
             input_data=HazopInput(**scenario["input"]),
             nodes=nodes,
             guidewords=guidewords,
+            risk_criteria=risk_criteria,
             msds_context=_msds_context(scenario),
         )
         result = asyncio.run(generate_hazop_draft(context))
@@ -62,6 +66,21 @@ def test_hazop_engine_reusable_scenarios(monkeypatch, tmp_path):
         export_result_excel(sample_excel, output_excel, result.risk_rows, result.action_rows)
         assert output_excel.exists(), scenario["id"]
         _assert_output_excel_row_counts(output_excel, expected["risk_count"], expected["action_count"], scenario["id"])
+
+
+def test_missing_criteria_sheet_uses_default_and_requires_confirmation(tmp_path):
+    source = BASE_DIR / "samples" / "HAZOP_CleanTech_CT-DIW-100.xlsx"
+    workbook = load_workbook(source)
+    del workbook["위험도기준"]
+    target = tmp_path / "without-criteria.xlsx"
+    workbook.save(target)
+    workbook.close()
+
+    _nodes, _guidewords, criteria = validate_and_parse_excel_with_criteria(target)
+
+    assert len(criteria.items) == 15
+    assert criteria.requires_confirmation
+    assert "업로드 Sheet 없음" in criteria.source
 
 
 def _disable_connected_model(monkeypatch):
