@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -38,44 +40,70 @@ class HazopInput(BaseModel):
 class AgentEvidence(BaseModel):
     """Agent가 왜 그렇게 판단했는지 남기는 근거입니다."""
 
-    reason: str
-    source: str = "agent"
+    reason: str = Field(..., min_length=1)
+    source: str = Field(default="agent", min_length=1)
+
+
+class RiskCriterion(BaseModel):
+    """업로드 Excel의 `위험도기준` Sheet 한 줄입니다."""
+
+    category: Literal["빈도", "강도", "위험도"]
+    score: str = Field(..., min_length=1)
+    description: str = Field(..., min_length=1)
+
+
+class RiskCriteria(BaseModel):
+    """모든 Agent와 시스템이 함께 사용하는 빈도·강도·위험도 기준표입니다."""
+
+    items: list[RiskCriterion] = Field(..., min_length=1)
+    source: str = Field(..., min_length=1)
+    requires_confirmation: bool = False
+
+
+class ReviewFinding(BaseModel):
+    """독립 검토 Agent가 무엇을 발견하고 어떻게 반영했는지 남기는 기록입니다."""
+
+    risk_assessment_no: int | None = Field(default=None, ge=1)
+    category: str = Field(..., min_length=1)
+    message: str = Field(..., min_length=1)
+    resolution: str = Field(..., min_length=1)
+    requires_confirmation: bool = False
 
 
 class RiskAssessmentRow(BaseModel):
     """`#3 위험성평가`에 들어갈 생성 결과 한 줄입니다."""
 
-    no: int
-    node_order: int
-    node_name: str
-    parameter: str
-    guideword: str
-    deviation: str
-    cause: str
-    consequence: str
-    existing_safeguard: str
-    frequency: int
-    severity: int
-    risk_score: int
-    risk_level: str
-    action_required: str
-    decision_evidence: list[AgentEvidence] = Field(default_factory=list)
-    severity_evidence: list[AgentEvidence] = Field(default_factory=list)
-    frequency_evidence: list[AgentEvidence] = Field(default_factory=list)
+    no: int = Field(..., ge=1)
+    node_order: int = Field(..., ge=1)
+    node_name: str = Field(..., min_length=1)
+    parameter: str = Field(..., min_length=1)
+    guideword: str = Field(..., min_length=1)
+    deviation: str = Field(..., min_length=1)
+    cause: str = Field(..., min_length=1)
+    consequence: str = Field(..., min_length=1)
+    existing_safeguard: str = Field(..., min_length=1)
+    frequency: int = Field(..., ge=1, le=5)
+    severity: int = Field(..., ge=1, le=4)
+    risk_score: int = Field(..., ge=0, le=20)
+    risk_level: str = Field(..., min_length=1)
+    action_required: str = Field(..., min_length=1)
+    decision_evidence: list[AgentEvidence] = Field(..., min_length=1)
+    severity_evidence: list[AgentEvidence] = Field(..., min_length=1)
+    frequency_evidence: list[AgentEvidence] = Field(..., min_length=1)
     note: str = ""
 
 
 class ActionPlanRow(BaseModel):
     """`#4 조치계획서`에 들어갈 생성 결과 한 줄입니다."""
 
-    no: int
-    risk_assessment_no: int
-    node_name: str
-    recommendation: str
-    after_frequency: int
-    after_severity: int
-    after_risk_score: int
-    evidence: list[AgentEvidence] = Field(default_factory=list)
+    no: int = Field(..., ge=1)
+    risk_assessment_no: int = Field(..., ge=1)
+    node_name: str = Field(..., min_length=1)
+    recommendation: str = Field(..., min_length=1)
+    after_frequency: int = Field(..., ge=1, le=5)
+    after_severity: int = Field(..., ge=1, le=4)
+    after_risk_score: int = Field(..., ge=0, le=20)
+    evidence: list[AgentEvidence] = Field(..., min_length=1)
     note: str = ""
 
 
@@ -85,4 +113,5 @@ class HazopResult(BaseModel):
     request_id: str
     risk_rows: list[RiskAssessmentRow]
     action_rows: list[ActionPlanRow]
+    review_findings: list[ReviewFinding] = Field(default_factory=list)
     output_excel: str | None = None

@@ -26,9 +26,11 @@ type AgentEvent = {
   kind?: LogKind;
   message?: string;
   loading?: boolean;
+  agent_id?: string;
+  phase?: "start" | "progress" | "finish";
 };
 
-type LogKind = "system" | "agent" | "skill" | "tool" | "result" | "warning" | "error";
+type LogKind = "system" | "workflow" | "agent" | "skill" | "tool" | "validation" | "result" | "warning" | "error";
 
 type LogGroup = {
   id: string;
@@ -49,22 +51,26 @@ type ChildLog = {
 
 type RiskRow = Record<string, unknown>;
 type ActionRow = Record<string, unknown>;
+type ReviewFinding = Record<string, unknown>;
 
 type HazopResult = {
   risk_rows: RiskRow[];
   action_rows: ActionRow[];
+  review_findings: ReviewFinding[];
   output_excel?: string;
 };
 
 function App() {
   const [file, setFile] = useState<File | null>(null);
-  const [maker, setMaker] = useState("CleanTech");
-  const [model, setModel] = useState("CT-DIW-100");
-  const [similarHazopId, setSimilarHazopId] = useState("STD-HAZOP-DIW-UTILITY-2026-001");
+  const [maker, setMaker] = useState("ColdChain");
+  const [model, setModel] = useState("NH3-Refrigeration");
+  const [similarHazopId, setSimilarHazopId] = useState("STD-HAZOP-NH3-REFRIGERATION-2026-001");
   const [operationIntent, setOperationIntent] = useState(
-    "CleanTech CT-DIW-100 신규 도입 PoC 검토용 입력입니다.\nDI Water 공급 중단, 유량 저하, 누수 중심으로 초안을 생성합니다.",
+    "ColdChain NH3-Refrigeration 냉동설비의 정상운전 및 비정상 상태 검토용입니다.\n액체 암모니아 저장, 압축, 오일 분리, 응축, 팽창, 증발 과정에서 과압·저압·과열·냉각 상실·누출 시나리오를 검토합니다.",
   );
-  const [incidentHistory, setIncidentHistory] = useState("최근 3년간 중대 사고 없음");
+  const [incidentHistory, setIncidentHistory] = useState(
+    "최근 3년간 사망·중대재해 없음.\n최근 1년간 Compressor 토출압 High Alarm 2회, Expansion Valve 결빙으로 유량 저하 1회, Machine Room 암모니아 감지기 경보 1회가 있었으며 실제 대량 누출은 확인되지 않음.\n정기점검 시 Compressor Mechanical Seal과 Receiver 연결부 미세 누설 여부를 중점 확인함.",
+  );
   const [preview, setPreview] = useState<PreviewData>({ nodes: [], guidewords: [] });
   const [nodeMaterials, setNodeMaterials] = useState<Record<string, string>>({});
   const [isPreviewLoading, setIsPreviewLoading] = useState(false);
@@ -74,6 +80,7 @@ function App() {
   const [downloadPath, setDownloadPath] = useState("");
   const [error, setError] = useState("");
   const currentSubAgentId = useRef<string | null>(null);
+  const agentGroupIds = useRef<Record<string, string>>({});
   const logScrollRef = useRef<HTMLDivElement | null>(null);
   const shouldStickToBottom = useRef(true);
 
@@ -137,6 +144,7 @@ function App() {
     setDownloadPath("");
     setLogs([]);
     currentSubAgentId.current = null;
+    agentGroupIds.current = {};
     shouldStickToBottom.current = true;
 
     if (!file) {
@@ -169,19 +177,44 @@ function App() {
 
     const source = new EventSource(`/api/jobs/${job_id}/events`);
     source.addEventListener("log", (message) => appendLog(JSON.parse((message as MessageEvent).data)));
-    source.addEventListener("error", (message) => {
-      const event = message as MessageEvent;
-      if (event.data) {
-        const data = JSON.parse(event.data);
-        appendLog({ title: "오류", detail: data.message, kind: "error" });
-      }
+    let terminalErrorHandled = false;
+    source.addEventListener("agent_error", (message) => {
+      terminalErrorHandled = true;
+      const data = JSON.parse((message as MessageEvent).data);
+      const reason = data.message || "서버가 상세 오류 메시지를 보내지 않았습니다.";
+      appendLog({
+        title: data.title || "초안 생성에 실패했습니다.",
+        detail: `실패 단계: ${data.stage || "확인 필요"}\n원인: ${reason}`,
+        kind: "error",
+      });
+      setError(reason);
+      stopAllLogSpinners();
       setStatus("실패");
       source.close();
     });
+    source.onerror = () => {
+      if (terminalErrorHandled) return;
+      terminalErrorHandled = true;
+      appendLog({
+        title: "실시간 Agent 로그 연결이 끊겼습니다.",
+        detail: "Agent 판단 실패가 아니라 브라우저와 서버 사이의 SSE 통신이 종료된 상태입니다. 중복 실행을 막기 위해 자동 재연결을 중지했습니다.",
+        kind: "error",
+      });
+      setError("실시간 로그 연결이 끊겼습니다. 작업을 다시 실행해 주세요.");
+      stopAllLogSpinners();
+      setStatus("연결 끊김");
+      source.close();
+    };
     source.addEventListener("done", (message) => {
       const data = JSON.parse((message as MessageEvent).data);
-      setResult({ risk_rows: data.risk_rows || [], action_rows: data.action_rows || [], output_excel: data.output_excel });
+      setResult({
+        risk_rows: data.risk_rows || [],
+        action_rows: data.action_rows || [],
+        review_findings: data.review_findings || [],
+        output_excel: data.output_excel,
+      });
       setDownloadPath(data.output_excel || "");
+      stopAllLogSpinners();
       appendLog({ title: "생성 완료", detail: "#3/#4 초안과 결과 Excel이 준비되었습니다.", kind: "result" });
       setStatus("완료");
       source.close();
@@ -194,10 +227,58 @@ function App() {
     const kind = event.kind || "agent";
     const loading = Boolean(event.loading) || title === "Deepagent가 초안을 생성 중입니다.";
     const progressLog = title === "Deepagent가 초안을 생성 중입니다.";
+    const agentId = event.agent_id;
+    const phase = event.phase;
 
     setLogs((previous) => {
       const next = [...previous];
-      const subAgentStart = title.includes("Sub Agent") || title.includes("Sub Agent 흐름");
+
+      // 새 Workflow는 각 로그에 정확한 Agent ID와 실행 단계를 보냅니다.
+      // 제목 문자열에 의존하지 않고 해당 Agent 부모 블록 안에 로그를 모읍니다.
+      if (agentId) {
+        let groupId = agentGroupIds.current[agentId];
+        let targetIndex = next.findIndex((item) => item.id === groupId);
+
+        if (phase === "start" || targetIndex < 0) {
+          if (targetIndex >= 0) {
+            next[targetIndex] = { ...next[targetIndex], title, detail, kind, loading: true };
+            return next;
+          }
+          const group = makeLogGroup(title, detail, kind, true);
+          agentGroupIds.current[agentId] = group.id;
+          currentSubAgentId.current = group.id;
+          return [...next, group];
+        }
+
+        const target = next[targetIndex];
+        const finishing = phase === "finish";
+        const stoppedChildren = finishing
+          ? target.children.map((child) => ({ ...child, loading: false }))
+          : [...target.children];
+        const duplicateIndex = stoppedChildren.findIndex(
+          (child) => child.title === title && child.detail === detail,
+        );
+
+        if (duplicateIndex >= 0) {
+          stoppedChildren[duplicateIndex] = {
+            ...stoppedChildren[duplicateIndex],
+            kind,
+            loading: loading && !finishing,
+          };
+        } else {
+          stoppedChildren.push(makeChildLog(title, detail, kind, loading && !finishing));
+        }
+
+        next[targetIndex] = {
+          ...target,
+          loading: !finishing,
+          children: stoppedChildren,
+        };
+        if (finishing && currentSubAgentId.current === target.id) currentSubAgentId.current = null;
+        return next;
+      }
+
+      const agentStart = title.includes("Agent를 실행합니다");
       const childCandidate = currentSubAgentId.current && ["skill", "tool", "result"].includes(kind);
 
       if (progressLog) {
@@ -209,7 +290,7 @@ function App() {
         return [...next, makeLogGroup(title, detail, kind, true)];
       }
 
-      if (subAgentStart) {
+      if (agentStart) {
         const group = makeLogGroup(title, detail, kind, true);
         currentSubAgentId.current = group.id;
         return [...next, group];
@@ -246,6 +327,17 @@ function App() {
     if (!element) return;
     const distanceFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
     shouldStickToBottom.current = distanceFromBottom < 32;
+  }
+
+  function stopAllLogSpinners() {
+    setLogs((previous) =>
+      previous.map((group) => ({
+        ...group,
+        loading: false,
+        children: group.children.map((child) => ({ ...child, loading: false })),
+      })),
+    );
+    currentSubAgentId.current = null;
   }
 
   return (
@@ -323,10 +415,10 @@ function App() {
                             </span>
                           ))}
                         </div>
-                        <input
-                          aria-label={`${node.node_name} 물질`}
-                          placeholder="물질 key-in"
-                          value={nodeMaterials[node.node_name] || ""}
+                      <input
+                        aria-label={`${node.node_name} 물질`}
+                        placeholder={`예: ${recommendedNodeMaterial(node.node_name)}`}
+                        value={nodeMaterials[node.node_name] || ""}
                           onChange={(event) =>
                             setNodeMaterials((previous) => ({
                               ...previous,
@@ -377,6 +469,11 @@ function App() {
               <div className="result-tables">
                 <ResultTable title="#3 위험성평가" rows={result.risk_rows} />
                 <ResultTable title="#4 조치계획서" rows={result.action_rows} emptyText="위험도 9 이상 항목이 없어 별도 조치계획서가 생성되지 않았습니다." />
+                <ResultTable
+                  title="초안 검토 및 보완 내역"
+                  rows={result.review_findings}
+                  emptyText="초안 검토 과정에서 별도 보완 내역이 없습니다."
+                />
               </div>
             )}
           </section>
@@ -519,6 +616,57 @@ function uniqueMaterials(values: Record<string, string>) {
   return Array.from(materials).join("\n") || "확인 필요";
 }
 
+const NODE_MATERIAL_EXAMPLES: Record<string, string> = {
+  "DI Water 공급 탱크": "DI Water",
+  "DI Water 이송 펌프": "DI Water",
+  "Wet 장비 공급 배관": "DI Water",
+  "Gas Cabinet": "Silane, Hydrogen, Nitrogen",
+  "VMB 및 공급 배관": "Silane, Hydrogen, Nitrogen",
+  "MFC 유량 제어 구간": "Silane, Hydrogen, Nitrogen",
+  "Purge 및 Scrubber 구간": "Nitrogen, Silane, Hydrogen",
+  "Etch Chamber": "HF, Nitrogen",
+  "Vacuum Pump Line": "HF, Nitrogen",
+  "Exhaust Scrubber": "HF",
+  "HF Chemical Supply": "HF",
+  "NH3 Receiver": "Ammonia",
+  "NH3 Compressor": "Ammonia",
+  "Oil Separator": "Ammonia",
+  Condenser: "Ammonia",
+  "Expansion Valve": "Ammonia",
+  "Evaporator 및 Machine Room": "Ammonia",
+  "IPA Drum Unloading": "Isopropyl alcohol",
+  "IPA Day Tank": "Isopropyl alcohol",
+  "Transfer Pump": "Isopropyl alcohol",
+  "Tool Supply Header": "Isopropyl alcohol",
+  "Waste Solvent Return": "Isopropyl alcohol",
+  "Chlorine Ton Container": "Chlorine",
+  Evaporator: "Chlorine",
+  "Vacuum Regulator": "Chlorine",
+  Chlorinator: "Chlorine",
+  "Injector 및 Contact Basin": "Chlorine",
+  "Emergency Scrubber": "Chlorine",
+  "Solvent Storage": "Ethylene carbonate, Dimethyl carbonate",
+  "LiPF6 Charging Booth": "Lithium hexafluorophosphate",
+  "Mixing Reactor": "Lithium hexafluorophosphate, Ethylene carbonate, Dimethyl carbonate",
+  "Heating/Cooling Jacket": "Lithium hexafluorophosphate, Ethylene carbonate, Dimethyl carbonate",
+  "Nitrogen Blanketing": "Nitrogen",
+  Filtration: "Lithium hexafluorophosphate, Ethylene carbonate, Dimethyl carbonate",
+  "Filling Line": "Lithium hexafluorophosphate, Ethylene carbonate, Dimethyl carbonate",
+  "Hydrogen Gas Cabinet": "Hydrogen, Nitrogen",
+  "Hydrogen VMB": "Hydrogen, Nitrogen",
+  "Ammonia Storage": "Ammonia",
+  "Ammonia Vaporizer": "Ammonia",
+  "Solvent Distribution": "Isopropyl alcohol",
+  "Nitrogen Purge Header": "Nitrogen",
+  "DI Water Cooling Loop": "DI Water",
+  "Process Reactor": "Hydrogen, Ammonia, Isopropyl alcohol, Nitrogen",
+  "Abatement 및 Exhaust": "Hydrogen, Ammonia, Isopropyl alcohol, Nitrogen",
+};
+
+function recommendedNodeMaterial(nodeName: string) {
+  return NODE_MATERIAL_EXAMPLES[nodeName] || "물질명 또는 CAS 번호";
+}
+
 function waitAtLeast(startedAt: number, ms: number) {
   const remaining = ms - (Date.now() - startedAt);
   return new Promise((resolve) => window.setTimeout(resolve, Math.max(0, remaining)));
@@ -527,9 +675,11 @@ function waitAtLeast(startedAt: number, ms: number) {
 function logKindLabel(kind: LogKind) {
   return {
     system: "시스템",
+    workflow: "Workflow",
     agent: "Agent",
     skill: "Skill",
     tool: "Tool",
+    validation: "검증",
     result: "Result",
     warning: "주의",
     error: "Error",
@@ -539,7 +689,7 @@ function logKindLabel(kind: LogKind) {
 function describeAgentRoles(value: string) {
   const roles: Array<[string, string]> = [
     ["risk-draft-agent", "risk-draft-agent (위험성평가 초안 작성)"],
-    ["risk-review-agent", "risk-review-agent (위험도 계산·근거 검토)"],
+    ["risk-review-agent", "risk-review-agent (초안 검토 및 보완)"],
     ["action-plan-agent", "action-plan-agent (고위험 항목 조치계획 작성)"],
   ];
 
@@ -567,22 +717,29 @@ function formatCell(value: unknown) {
 
 function displayColumnName(header: string) {
   const labels: Record<string, string> = {
-    no: "No.",
-    node_order: "Node 순번",
-    node_name: "Node명",
+    no: "번호",
+    node_order: "노드 순번",
+    node_name: "노드명",
     parameter: "변수",
-    guideword: "Guideword",
+    guideword: "가이드워드",
     deviation: "이탈",
+    cause: "원인",
     possible_causes: "가능 원인",
     causes: "원인",
     consequences: "예상 결과",
     consequence: "결과",
     safeguards: "현재 안전조치",
+    existing_safeguard: "현재 안전조치",
     existing_safeguards: "기존 안전조치",
     frequency: "빈도",
     severity: "강도",
     risk_score: "위험도",
     risk_level: "위험 등급",
+    action_required: "조치 필요 여부",
+    decision_evidence: "판단 근거",
+    severity_evidence: "강도 판단 근거",
+    frequency_evidence: "빈도 판단 근거",
+    note: "비고",
     recommendations: "권고 조치",
     recommendation: "권고 조치",
     action_item: "조치 내용",
@@ -590,18 +747,37 @@ function displayColumnName(header: string) {
     owner: "담당",
     due_date: "완료 기한",
     completion_criteria: "완료 기준",
+    after_frequency: "조치 후 빈도",
+    after_severity: "조치 후 강도",
+    after_risk_score: "조치 후 위험도",
+    evidence: "조치 판단 근거",
     basis: "근거",
     rationale: "판단 근거",
     msds_basis: "MSDS 근거",
     material: "물질",
     priority: "우선순위",
     status: "상태",
+    risk_assessment_no: "위험성평가 번호",
+    category: "검토 구분",
+    message: "발견 내용",
+    resolution: "반영 내용",
+    requires_confirmation: "담당자 확인 필요",
   };
   return labels[header] || header.replaceAll("_", " ");
 }
 
 function columnClassName(header: string) {
   const compactColumns = new Set(["no", "node_order", "frequency", "severity", "risk_score"]);
+  const evidenceColumns = new Set([
+    "decision_evidence",
+    "severity_evidence",
+    "frequency_evidence",
+    "evidence",
+    "basis",
+    "rationale",
+    "msds_basis",
+  ]);
+  if (evidenceColumns.has(header)) return "evidence-column";
   return compactColumns.has(header) ? "numeric-column" : undefined;
 }
 
@@ -613,45 +789,42 @@ function getGenerationStage(logs: LogGroup[], status: string) {
     };
   }
 
-  const recentText = [...logs]
-    .reverse()
-    .flatMap((group) => [
-      `${group.title} ${group.detail}`,
-      ...[...group.children].reverse().map((child) => `${child.title} ${child.detail}`),
-    ])
-    .join("\n");
+  // 완료된 과거 Agent가 아니라 현재 스피너가 돌고 있는 Agent만 표시합니다.
+  const activeAgent = [...logs].reverse().find((group) => group.loading);
+  const activeText = activeAgent ? `${activeAgent.title} ${activeAgent.detail}` : "";
 
-  if (recentText.includes("action-plan-agent") || recentText.includes("hazop_action_plan") || recentText.includes("#4 조치계획서")) {
+  if (activeText.includes("action-plan-agent")) {
     return {
-      title: "#4 조치계획서를 작성하는 중입니다.",
-      detail: "위험도 9 이상 항목을 기준으로 권고 조치, 담당 부서, 완료 기준을 정리하고 있습니다.",
+      title: "#4 고위험 항목의 조치계획을 작성하고 있습니다.",
+      detail: "위험도 9 이상 항목을 골라 원인을 줄일 수 있는 권고 조치와 완료 기준을 정리하고 있습니다.",
     };
   }
 
-  if (recentText.includes("risk-review-agent") || recentText.includes("calculate_hazop_risk") || recentText.includes("검토")) {
+  if (activeText.includes("risk-review-agent")) {
     return {
       title: "#3 위험도 계산과 검토를 진행 중입니다.",
       detail: "AI가 쓴 빈도와 강도를 시스템 규칙으로 다시 계산하고, 빠진 근거가 없는지 확인하고 있습니다.",
     };
   }
 
-  if (recentText.includes("frequency_estimation") || recentText.includes("빈도") || recentText.includes("강도")) {
+  if (activeText.includes("risk-draft-agent")) {
     return {
-      title: "#3 빈도와 강도 근거를 정리하는 중입니다.",
-      detail: "각 Guideword별 발생 가능성과 영향도를 HAZOP 초안 형식에 맞춰 채우고 있습니다.",
+      title: "#3 위험성평가 초안을 작성하고 있습니다.",
+      detail: "Node와 Guideword를 기준으로 가능한 원인, 예상 결과, 현재 안전조치와 빈도·강도 근거를 정리하고 있습니다.",
     };
   }
 
-  if (recentText.includes("risk-draft-agent") || recentText.includes("hazop_risk_draft") || recentText.includes("모델 응답 대기")) {
+  const latest = logs.at(-1);
+  if (latest?.kind === "validation") {
     return {
-      title: "#3 원인과 결과를 분석하는 중입니다.",
-      detail: "Node와 Guideword 기준으로 이탈 원인, 예상 결과, 현재 안전조치를 작성하고 있습니다.",
+      title: "시스템이 최종 결과를 확인하고 있습니다.",
+      detail: "위험도 계산값과 결과 Excel 저장 내용을 점검하고 있습니다.",
     };
   }
 
   return {
-    title: "#3/#4 초안 생성을 준비하는 중입니다.",
-    detail: "입력 정보와 Agent 실행 흐름을 정리한 뒤 위험성평가 초안 생성을 시작합니다.",
+    title: "다음 처리 단계를 준비하고 있습니다.",
+    detail: "현재 단계가 끝나면 자동으로 다음 Workflow 단계로 이동합니다.",
   };
 }
 

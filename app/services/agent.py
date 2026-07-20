@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 from pathlib import Path
 from typing import AsyncIterator
 from uuid import uuid4
@@ -19,7 +20,7 @@ from app.schemas.hazop import (
     HazopResult,
     RiskAssessmentRow,
 )
-from app.services.excel import export_result_excel, validate_and_parse_excel
+from app.services.excel import export_result_excel, validate_and_parse_excel_with_criteria
 from app.services.llm import azure_openai_configured, connected_model_label, generate_json_with_azure, missing_azure_openai_env
 from app.services.msds import MsdsSummary, fetch_msds_summary_with_trace, material_names
 from app.services.risk import action_required, calculate_risk_score, clamp_frequency, clamp_severity, risk_level
@@ -56,15 +57,30 @@ async def run_hazop_agent(
     await _log_delay()
 
     try:
-        nodes, guidewords = validate_and_parse_excel(excel_path)
+        nodes, guidewords, risk_criteria = validate_and_parse_excel_with_criteria(excel_path)
     except Exception as exc:
-        yield AgentRunEvent("error", {"message": str(exc)})
+        yield AgentRunEvent(
+            "agent_error",
+            {
+                "title": "Excel 입력 검증에 실패했습니다.",
+                "message": str(exc) or exc.__class__.__name__,
+                "stage": "excel_validation",
+            },
+        )
         return
 
     yield _log(
         "#1 노드리스트와 #2 가이드워드를 검증했습니다.",
         f"Node {len(nodes)}개, 평가 조합 {len(guidewords)}개를 확인했습니다. #3/#4는 비어 있어도 정상입니다.",
-        kind="tool",
+        kind="workflow",
+    )
+    await _log_delay()
+
+    yield _log(
+        "위험도 기준표를 준비했습니다.",
+        f"{risk_criteria.source}에서 빈도·강도·위험도 기준 {len(risk_criteria.items)}건을 읽었습니다."
+        + (" 업로드 기준표가 없어 담당자 확인이 필요합니다." if risk_criteria.requires_confirmation else ""),
+        kind="workflow",
     )
     await _log_delay()
 
@@ -73,29 +89,29 @@ async def run_hazop_agent(
         materials = ["확인 필요"]
 
     yield _log(
-        "MSDS 추가 조회 필요성을 판단했습니다.",
-        f"입력 물질({', '.join(materials)})은 결과/강도 판단에 직접 영향을 주므로 MSDS 조회 대상으로 선택했습니다.",
-        kind="agent",
+        "Workflow 필수 MSDS 조회를 시작합니다.",
+        f"입력된 모든 물질({', '.join(materials)})을 누락 없이 최초 1회씩 조회합니다. 이 단계는 AI 판단이 아닌 고정 절차입니다.",
+        kind="system",
     )
     await _log_delay()
 
     msds_context: dict[str, MsdsSummary] = {}
     for material in materials:
         yield _log(
-            "MSDS 조회 계획을 세웠습니다.",
-            f"{material}의 유해성, 취급 기준, 누출 대응 정보가 강도와 현재안전조치 판단에 필요합니다.",
-            kind="skill",
+            "입력 물질 MSDS를 최초 조회합니다.",
+            f"{material}의 유해성, 취급 기준, 누출 대응 정보를 Workflow가 1회 조회합니다.",
+            kind="workflow",
         )
         await _log_delay()
         lookup = await fetch_msds_summary_with_trace(material)
         for step in lookup.steps:
-            yield _log(step.title, step.detail, kind="tool")
+            yield _log(step.title, step.detail, kind="workflow")
             await _log_delay()
         summary = lookup.summary
         msds_context[material.lower()] = summary
         yield _log(
             "MSDS 정보를 요약했습니다.",
-            f"{summary.material}: {'; '.join(summary.hazards[:2])} / 출처: {summary.source}",
+            f"{summary.material}: {'; '.join(summary.hazards[:2])} / 출처: {summary.source} / 최초 조회 완료",
             kind="result",
         )
         await _log_delay()
@@ -104,21 +120,21 @@ async def run_hazop_agent(
         yield _log(
             "표준공정위험성평가서 참고 여부를 판단했습니다.",
             f"사용자가 제공한 Link/ID({input_data.standard_hazop_link})를 유사사례 근거로 사용합니다.",
-            kind="skill",
+            kind="workflow",
         )
         await _log_delay()
     else:
         yield _log(
             "표준공정위험성평가서 참고자료가 없습니다.",
             "표준 문서 근거가 부족한 항목은 결과 비고에 '확인 필요'를 표시합니다.",
-            kind="skill",
+            kind="workflow",
         )
         await _log_delay()
 
     if azure_openai_configured():
         yield _log(
             "Deepagent HAZOP Engine을 시작합니다.",
-            f"연결된 {connected_model_label()} 모델로 #3/#4 초안 생성, 근거 작성, 초안 검토를 수행합니다.",
+            f"연결된 {connected_model_label()} 모델로 #3 작성, 초안 검토 및 보완, 검토 반영, #4 조치계획 생성을 순서대로 수행합니다.",
             kind="agent",
         )
     else:
@@ -134,6 +150,7 @@ async def run_hazop_agent(
         input_data=input_data,
         nodes=nodes,
         guidewords=guidewords,
+        risk_criteria=risk_criteria,
         msds_context=msds_context,
     )
     draft_result = None
@@ -147,15 +164,19 @@ async def run_hazop_agent(
     while not draft_task.done() or not progress_events.empty():
         try:
             engine_event = await asyncio.wait_for(progress_events.get(), timeout=max(0.5, heartbeat_seconds))
-            yield _log(engine_event.title, engine_event.detail, kind=engine_event.kind)
+            yield _log(
+                engine_event.title,
+                engine_event.detail,
+                kind=engine_event.kind,
+                loading=engine_event.loading,
+                agent_id=engine_event.agent_id,
+                phase=engine_event.phase,
+            )
+            await _progress_log_delay(engine_event)
         except TimeoutError:
             if not draft_task.done():
-                yield _log(
-                    "모델 응답 대기 중입니다.",
-                    "현재 Sub Agent가 Azure OpenAI 응답을 기다리고 있습니다. 완료되면 다음 단계로 자동 이동합니다.",
-                    kind="tool",
-                    loading=True,
-                )
+                # 화면에 같은 대기 문장을 계속 쌓지 않고 SSE 연결만 조용히 유지합니다.
+                yield AgentRunEvent("heartbeat", {"status": "waiting"})
 
     if draft_result is None:
         draft_result = await draft_task
@@ -170,13 +191,13 @@ async def run_hazop_agent(
 
     calculated_rows = draft_result.risk_rows
     action_rows = draft_result.action_rows
-    for row in calculated_rows:
-        yield _log(
-            f"{row.node_name} / {row.parameter} / {row.guideword} 위험도를 계산했습니다.",
-            f"근거: 빈도 {row.frequency} * 강도 {row.severity} = 위험도 {row.risk_score}, 판단: {row.risk_level}, 조치필요여부: {row.action_required}",
-            kind="tool",
-        )
-        await _log_delay()
+    high_risk_count = sum(row.risk_score >= 9 for row in calculated_rows)
+    yield _log(
+        "최종 결과의 시스템 검증을 완료했습니다.",
+        f"위험성평가 {len(calculated_rows)}건의 빈도·강도 범위와 위험도 계산값을 확인했습니다. 위험도 9 이상은 {high_risk_count}건입니다.",
+        kind="validation",
+    )
+    await _log_delay()
 
     if action_rows:
         yield _log(
@@ -199,6 +220,7 @@ async def run_hazop_agent(
         request_id=request_id,
         risk_rows=calculated_rows,
         action_rows=action_rows,
+        review_findings=draft_result.review_findings,
         output_excel=str(output_excel),
     )
     result_path = workdir / "result.json"
@@ -644,8 +666,25 @@ def _material_label(msds_context: dict[str, MsdsSummary]) -> str:
     return "/".join(names) if names else "물질"
 
 
-def _log(title: str, detail: str, kind: str = "agent", loading: bool = False) -> AgentRunEvent:
-    return AgentRunEvent("log", {"title": title, "detail": detail, "kind": kind, "loading": loading})
+def _log(
+    title: str,
+    detail: str,
+    kind: str = "agent",
+    loading: bool = False,
+    agent_id: str | None = None,
+    phase: str | None = None,
+) -> AgentRunEvent:
+    return AgentRunEvent(
+        "log",
+        {
+            "title": title,
+            "detail": detail,
+            "kind": kind,
+            "loading": loading,
+            "agent_id": agent_id,
+            "phase": phase,
+        },
+    )
 
 
 async def _log_delay() -> None:
@@ -659,3 +698,19 @@ async def _log_delay() -> None:
     delay = float(os.getenv("AGENT_LOG_DELAY_SECONDS", "1.0"))
     if delay > 0:
         await asyncio.sleep(delay)
+
+
+async def _progress_log_delay(engine_event) -> None:
+    """전문 Agent의 세부 로그를 사용자가 읽을 수 있는 속도로 전달합니다.
+
+    실제 Agent 작업은 별도 Task에서 계속 실행됩니다. 여기서는 이미 Queue에 들어온
+    화면 이벤트만 불규칙한 간격으로 내보내므로 LLM 실행 시간을 인위적으로 늘리지 않습니다.
+    """
+
+    if not engine_event.agent_id or engine_event.phase not in {"start", "progress"}:
+        return
+
+    minimum = max(0.0, float(os.getenv("AGENT_PROGRESS_LOG_MIN_SECONDS", "0.8")))
+    maximum = max(minimum, float(os.getenv("AGENT_PROGRESS_LOG_MAX_SECONDS", "2.0")))
+    if maximum > 0:
+        await asyncio.sleep(random.uniform(minimum, maximum))

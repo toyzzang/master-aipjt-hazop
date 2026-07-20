@@ -6,7 +6,7 @@ from typing import Any
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
-from app.schemas.hazop import ActionPlanRow, GuidewordRow, NodeRow, RiskAssessmentRow
+from app.schemas.hazop import ActionPlanRow, GuidewordRow, NodeRow, RiskAssessmentRow, RiskCriteria, RiskCriterion
 
 
 NODE_SHEET = "#1 노드리스트"
@@ -48,6 +48,24 @@ ACTION_HEADERS = [
     "근거",
     "비고",
 ]
+CRITERIA_HEADERS = ["구분", "점수", "기준"]
+DEFAULT_CRITERIA_ROWS = [
+    ["빈도", 1, "10년에 1회 정도 발생할 경우 또는 없을 경우"],
+    ["빈도", 2, "5년에 1회 정도 발생할 경우"],
+    ["빈도", 3, "1년에 1회 정도 발생할 경우"],
+    ["빈도", 4, "1개월 1회 정도 발생할 경우"],
+    ["빈도", 5, "1일 1회 정도 발생할 경우"],
+    ["강도", 1, "영향없음, 이상등급/관리사고"],
+    ["강도", 2, "경미한 불휴업 재해, C급/준사고"],
+    ["강도", 3, "경미한 휴업 재해, B급 경미재해"],
+    ["강도", 4, "중대재해, A급 사망 등 중대재해"],
+    ["위험도", "1~3", "무시할 수 있는 위험 - 현재 안전대책 유지"],
+    ["위험도", "4~6", "미미한 위험 - 안전정보 및 주기적 표준작업안전 교육 필요"],
+    ["위험도", 8, "경미한 위험 - 표지부착, 작업절차서 표기 등 관리적 대책 필요"],
+    ["위험도", "9~11", "상당한 위험 - 계획된 정비/보수기간에 위험성 감소대책 필요"],
+    ["위험도", "12~15", "중대한 위험 - 긴급 임시안전대책 후 계획 정비/보수기간에 안전대책 필요"],
+    ["위험도", "16~20", "허용불가 위험 - 즉시 작업중단 및 즉시 개선 필요"],
+]
 
 
 def read_nodes_from_excel(path_or_file) -> list[NodeRow]:
@@ -84,7 +102,16 @@ def read_input_preview_from_excel(path_or_file) -> tuple[list[NodeRow], list[Gui
 
 
 def validate_and_parse_excel(path: Path) -> tuple[list[NodeRow], list[GuidewordRow]]:
-    """업로드 Excel에서 `#1`, `#2`를 검증하고 구조화 데이터로 바꿉니다.
+    """기존 호출부 호환을 위해 `#1`, `#2` 결과만 반환합니다."""
+
+    nodes, guidewords, _criteria = validate_and_parse_excel_with_criteria(path)
+    return nodes, guidewords
+
+
+def validate_and_parse_excel_with_criteria(
+    path: Path,
+) -> tuple[list[NodeRow], list[GuidewordRow], RiskCriteria]:
+    """업로드 Excel의 입력 Row와 위험도 기준표를 검증·구조화합니다.
 
     `#3`, `#4`는 AI가 채울 답안지라서 비어 있어도 정상입니다.
     이 함수는 사용자가 미리 작성해야 하는 "문제지"인 `#1`, `#2`만 검사합니다.
@@ -108,7 +135,12 @@ def validate_and_parse_excel(path: Path) -> tuple[list[NodeRow], list[GuidewordR
         if invalid:
             raise ValueError(f"#2 가이드워드에 #1 노드리스트와 맞지 않는 Node가 있습니다: {', '.join(invalid)}")
 
-        return nodes, guidewords
+        if CRITERIA_SHEET in workbook.sheetnames:
+            criteria = _read_criteria(workbook[CRITERIA_SHEET])
+        else:
+            criteria = _default_risk_criteria()
+
+        return nodes, guidewords, criteria
     finally:
         workbook.close()
 
@@ -247,6 +279,51 @@ def _read_guidewords(sheet) -> list[GuidewordRow]:
     return rows
 
 
+def _read_criteria(sheet) -> RiskCriteria:
+    """`위험도기준` Sheet를 Agent가 그대로 참고할 수 있는 구조로 읽습니다."""
+
+    header_map = _header_map(sheet)
+    _require_headers(header_map, CRITERIA_HEADERS, CRITERIA_SHEET)
+    items: list[RiskCriterion] = []
+    for row_index in range(2, sheet.max_row + 1):
+        category = sheet.cell(row_index, header_map["구분"]).value
+        score = sheet.cell(row_index, header_map["점수"]).value
+        description = sheet.cell(row_index, header_map["기준"]).value
+        if all(value is None for value in [category, score, description]):
+            continue
+        items.append(
+            RiskCriterion(
+                category=str(category).strip(),
+                score=str(score).strip(),
+                description=str(description).strip(),
+            )
+        )
+    if not items:
+        raise ValueError("위험도기준 Sheet에 데이터가 없습니다.")
+    _validate_criteria_coverage(items)
+    return RiskCriteria(items=items, source="업로드 Excel/위험도기준", requires_confirmation=False)
+
+
+def _default_risk_criteria() -> RiskCriteria:
+    return RiskCriteria(
+        items=[
+            RiskCriterion(category=str(category), score=str(score), description=str(description))
+            for category, score, description in DEFAULT_CRITERIA_ROWS
+        ],
+        source="프로젝트 기본 위험도기준(업로드 Sheet 없음)",
+        requires_confirmation=True,
+    )
+
+
+def _validate_criteria_coverage(items: list[RiskCriterion]) -> None:
+    frequency_scores = {item.score for item in items if item.category == "빈도"}
+    severity_scores = {item.score for item in items if item.category == "강도"}
+    if frequency_scores != {"1", "2", "3", "4", "5"}:
+        raise ValueError("위험도기준 Sheet의 빈도 점수는 1~5가 각각 한 번씩 필요합니다.")
+    if severity_scores != {"1", "2", "3", "4"}:
+        raise ValueError("위험도기준 Sheet의 강도 점수는 1~4가 각각 한 번씩 필요합니다.")
+
+
 def _header_map(sheet) -> dict[str, int]:
     return {str(cell.value).strip(): cell.column for cell in sheet[1] if cell.value}
 
@@ -289,25 +366,8 @@ def _clear_data_rows(sheet) -> None:
 
 
 def _write_criteria(sheet) -> None:
-    sheet.append(["구분", "점수", "기준"])
-    rows = [
-        ["빈도", 1, "10년에 1회 정도 발생할 경우 또는 없을 경우"],
-        ["빈도", 2, "5년에 1회 정도 발생할 경우"],
-        ["빈도", 3, "1년에 1회 정도 발생할 경우"],
-        ["빈도", 4, "1개월 1회 정도 발생할 경우"],
-        ["빈도", 5, "1일 1회 정도 발생할 경우"],
-        ["강도", 1, "영향없음, 이상등급/관리사고"],
-        ["강도", 2, "경미한 불휴업 재해, C급/준사고"],
-        ["강도", 3, "경미한 휴업 재해, B급 경미재해"],
-        ["강도", 4, "중대재해, A급 사망 등 중대재해"],
-        ["위험도", "1~3", "무시할 수 있는 위험 - 현재 안전대책 유지"],
-        ["위험도", "4~6", "미미한 위험 - 안전정보 및 주기적 표준작업안전 교육 필요"],
-        ["위험도", 8, "경미한 위험 - 표지부착, 작업절차서 표기 등 관리적 대책 필요"],
-        ["위험도", "9~11", "상당한 위험 - 계획된 정비/보수기간에 위험성 감소대책 필요"],
-        ["위험도", "12~15", "중대한 위험 - 긴급 임시안전대책 후 계획 정비/보수기간에 안전대책 필요"],
-        ["위험도", "16~20", "허용불가 위험 - 즉시 작업중단 및 즉시 개선 필요"],
-    ]
-    for row in rows:
+    sheet.append(CRITERIA_HEADERS)
+    for row in DEFAULT_CRITERIA_ROWS:
         sheet.append(row)
 
 

@@ -1,7 +1,7 @@
 import asyncio
 
 from app.services import msds
-from app.services.msds import KoshaLookupOutcome, MsdsSummary
+from app.services.msds import KoshaLookupOutcome, MsdsLookupResult, MsdsSummary
 
 
 def test_kosha_parser_selects_exact_material_and_extracts_detail():
@@ -53,3 +53,32 @@ def test_lookup_trace_reports_kosha_success(monkeypatch):
 
     assert result.summary.source.startswith("KOSHA MSDS 검색")
     assert "검색 결과를 찾았습니다" in result.steps[-1].title
+
+
+def test_agent_msds_tool_returns_explicit_lookup_contract(monkeypatch):
+    import app.hazop_engine.tools.msds_tools as msds_tools
+
+    async def fake_lookup(_material: str) -> MsdsLookupResult:
+        return MsdsLookupResult(
+            summary=MsdsSummary(
+                material="Silane",
+                hazards=["공기 중 자연발화 가능"],
+                handling=["누출 시 긴급차단 및 대피"],
+                source="PoC 내장 MSDS 요약",
+            ),
+            steps=[],
+        )
+
+    monkeypatch.setattr(msds_tools, "fetch_msds_summary_with_trace", fake_lookup)
+
+    result = msds_tools.lookup_msds_detail(
+        "Silane",
+        cas_number="7803-62-5",
+        requested_sections=["hazards", "leak_fire_emergency"],
+    )
+
+    assert result["cas_number"] == "7803-62-5"
+    assert result["requested_sections"] == ["hazards", "leak_fire_emergency"]
+    assert result["lookup_succeeded"]
+    assert result["fallback_used"]
+    assert result["source"] == "PoC 내장 MSDS 요약"

@@ -146,7 +146,12 @@ async def job_events(job_id: str) -> StreamingResponse:
         try:
             update_job_status(job_id, "RUNNING")
             async for event in run_hazop_agent(input_data, excel_path, REQUEST_DIR):
-                save_agent_event(job_id, event.event, event.data)
+                # heartbeat는 긴 LLM 호출 중 SSE 연결만 유지하는 신호입니다.
+                # 사용자가 읽는 실행 로그가 아니므로 DB에도 반복 저장하지 않습니다.
+                if event.event != "heartbeat":
+                    save_agent_event(job_id, event.event, event.data)
+                if event.event == "agent_error":
+                    update_job_status(job_id, "FAILED")
                 if event.event == "done":
                     update_job_status(
                         job_id,
@@ -164,9 +169,15 @@ async def job_events(job_id: str) -> StreamingResponse:
                     )
                 yield event.to_sse()
         except Exception as exc:
+            message = str(exc).strip() or exc.__class__.__name__
             update_job_status(job_id, "FAILED")
-            save_agent_event(job_id, "error", {"message": str(exc)})
-            yield AgentRunEvent("error", {"message": str(exc)}).to_sse()
+            payload = {
+                "title": "초안 생성 중 오류가 발생했습니다.",
+                "message": message,
+                "stage": "agent_workflow",
+            }
+            save_agent_event(job_id, "agent_error", payload)
+            yield AgentRunEvent("agent_error", payload).to_sse()
 
     return StreamingResponse(stream(), media_type="text/event-stream")
 

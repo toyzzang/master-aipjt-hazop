@@ -13,6 +13,8 @@
   --result: #14745f;
   --warning: #a75d00;
   --error: #b4233c;
+  --evidence-header: #e8edf2;
+  --evidence-header-ink: #303943;
   --panel-height: 600px;
 }
 
@@ -435,8 +437,18 @@ textarea {
   padding: 12px 13px;
 }
 
-.log-card.kind-error { border-color: #f1b8c2; background: #fff8fa; }
-.log-card.kind-warning { border-color: #eed7b5; background: #fffaf2; }
+.log-card.kind-error,
+.log-card.kind-warning,
+.log-card.kind-workflow,
+.log-card.kind-validation,
+.log-card.kind-system,
+.log-card.kind-agent,
+.log-card.kind-skill,
+.log-card.kind-tool,
+.log-card.kind-result {
+  border-color: #e4eaf1;
+  background: #ffffff;
+}
 
 .log-card-top {
   display: flex;
@@ -532,6 +544,8 @@ textarea {
 
 .result-panel {
   min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .output-grid .log-panel-wrap {
@@ -559,14 +573,29 @@ textarea {
 }
 
 .result-progress {
+  position: relative;
+  overflow: hidden;
+  flex: 1;
   display: flex;
   align-items: center;
+  justify-content: center;
+  flex-direction: column;
   gap: 16px;
-  min-height: 260px;
+  min-height: 520px;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--soft);
   padding: 24px;
+  text-align: center;
+}
+
+.result-progress::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(circle at center, rgba(69, 88, 184, 0.09), transparent 58%);
+  animation: result-panel-glow 2.8s ease-in-out infinite;
 }
 
 .result-wait-indicator {
@@ -602,6 +631,12 @@ textarea {
   color: var(--ink);
   font-size: 17px;
   line-height: 1.35;
+}
+
+.result-progress > div:last-child {
+  position: relative;
+  max-width: 620px;
+  animation: result-message-fade 2.8s ease-in-out infinite;
 }
 
 .result-progress p {
@@ -654,6 +689,11 @@ td.numeric-column {
   white-space: nowrap;
 }
 
+th.evidence-column {
+  background: var(--evidence-header);
+  color: var(--evidence-header-ink);
+}
+
 th {
   position: sticky;
   top: 0;
@@ -688,10 +728,36 @@ td {
   }
 }
 
+@keyframes result-message-fade {
+  0%,
+  100% {
+    opacity: 0.58;
+    transform: translateY(2px);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes result-panel-glow {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: scale(0.96);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.04);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .result-wait-indicator span {
+  .result-wait-indicator span,
+  .result-progress::before,
+  .result-progress > div:last-child {
     animation: none;
-    opacity: 0.65;
+    opacity: 1;
     transform: none;
   }
 }

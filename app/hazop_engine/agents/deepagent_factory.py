@@ -18,6 +18,7 @@ def create_hazop_deep_agent(
     tools: list,
     system_prompt: str,
     response_format: type,
+    agent_name: str,
 ):
     """HAZOP 전용 Deepagent를 생성합니다.
 
@@ -27,6 +28,7 @@ def create_hazop_deep_agent(
 
     try:
         from deepagents import create_deep_agent
+        from deepagents.backends import FilesystemBackend
     except Exception as exc:  # pragma: no cover - 설치 환경에 따라 달라집니다.
         raise DeepAgentUnavailable("deepagents 패키지를 import할 수 없습니다.") from exc
 
@@ -38,9 +40,15 @@ def create_hazop_deep_agent(
         "tools": tools,
         "system_prompt": system_prompt,
         "response_format": response_format,
-        "subagents": _hazop_subagents(model),
+        "name": agent_name,
+        # 작성/검토/조치 Agent는 workflow에서 각각 별도 LLM 호출로 실행합니다.
+        # 내부 task 위임에 기대지 않아 독립 검토 실행 여부가 코드 흐름에서 분명해집니다.
+        "subagents": [],
         "skills": _skill_paths(),
-        "permissions": [{"operations": ["read", "write"], "paths": ["**"], "mode": "deny"}],
+        "permissions": _filesystem_permissions(),
+        # 기본 StateBackend는 메모리 파일만 보므로 로컬 SKILL.md를 찾을 수 없습니다.
+        # 실제 Skill 폴더를 읽되, 아래 permissions로 읽기 범위를 Skill 루트에 제한합니다.
+        "backend": FilesystemBackend(root_dir="/", virtual_mode=False),
     }
     _apply_filesystem_lockdown()
     return create_deep_agent(**kwargs)
@@ -81,57 +89,41 @@ def _azure_chat_model() -> AzureChatOpenAI:
     )
 
 
-def _hazop_subagents(model: AzureChatOpenAI) -> list[dict[str, Any]]:
-    """Deep Agents의 task 도구로 호출 가능한 전문 sub-agent 정의입니다."""
-
-    return [
-        {
-            "name": "risk-draft-agent",
-            "description": "#3 위험성평가 초안을 작성하는 HAZOP 작성자입니다.",
-            "system_prompt": "입력 Excel의 Node, 변수, Guideword만 사용해 #3 위험성평가 초안을 작성한다.",
-            "model": model,
-        },
-        {
-            "name": "risk-review-agent",
-            "description": "#3 위험성평가 초안을 검토하고 규칙 위반과 근거 부족을 찾는 검토자입니다.",
-            "system_prompt": "HAZOP 초안이 입력 기준, 빈도/강도 범위, 근거 작성 원칙을 지키는지 검토한다.",
-            "model": model,
-        },
-        {
-            "name": "action-plan-agent",
-            "description": "위험도 9 이상 항목의 #4 조치계획서 초안을 작성하는 담당자입니다.",
-            "system_prompt": "고위험 항목에 대해 개선권고사항과 조치 후 빈도/강도 후보 근거를 작성한다.",
-            "model": model,
-        },
-    ]
-
-
 def _skill_paths() -> list[str]:
+    """DeepAgents가 하위 Skill 폴더를 탐색할 수 있도록 모음 폴더를 넘깁니다."""
+
     base = os.path.join(os.path.dirname(os.path.dirname(__file__)), "skills")
-    names = [
-        "hazop_risk_draft",
-        "hazop_risk_review",
-        "hazop_action_plan",
-        "incident_history_analysis",
-        "standard_hazop_reference",
-        "frequency_estimation",
-        "standard_hazop_comparison",
+    return [base]
+
+
+def _filesystem_permissions() -> list[Any]:
+    """Agent는 Skill 설명서만 읽을 수 있고 프로젝트 파일은 수정할 수 없습니다."""
+
+    from deepagents.middleware.filesystem import FilesystemPermission
+
+    skill_root = _skill_paths()[0]
+    deny_all_patterns = ["/**", "/**/.*", "/**/.*/**", "/**/*.*"]
+    return [
+        FilesystemPermission(operations=["read"], paths=[f"{skill_root}/**"], mode="allow"),
+        FilesystemPermission(operations=["read"], paths=deny_all_patterns, mode="deny"),
+        FilesystemPermission(operations=["write"], paths=deny_all_patterns, mode="deny"),
     ]
-    return [os.path.join(base, name) for name in names]
 
 
 def _apply_filesystem_lockdown() -> None:
-    """Deepagent 기본 파일 도구가 보이더라도 HAZOP 생성에는 쓰지 않게 숨깁니다.
+    """Skill 읽기는 남기고 프로젝트 탐색·수정·명령 실행 도구는 숨깁니다.
 
-    공식 문서는 tool/sandbox 수준 경계를 강조하므로, 지원되는 버전에서는 파일 도구를
-    제외합니다. API가 다른 버전이면 실패하지 않고 custom Tool만 제공하는 구조로 둡니다.
+    DeepAgents Skill은 Agent가 `read_file`로 SKILL.md 전체 본문을 읽어야 동작합니다.
+    따라서 `read_file`까지 제외했던 기존 설정은 제거하고, 실제 읽을 수 있는 경로는
+    위 `_filesystem_permissions`에서 Skill 모음 폴더로만 제한합니다.
     """
 
     try:
-        from deepagents import HarnessProfile, register_harness_profile
+        from deepagents import GeneralPurposeSubagentProfile, HarnessProfile, register_harness_profile
 
         profile = HarnessProfile(
-            excluded_tools=frozenset({"ls", "read_file", "write_file", "edit_file", "glob", "grep", "execute"})
+            excluded_tools=frozenset({"ls", "write_file", "edit_file", "glob", "grep", "execute"}),
+            general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False),
         )
         model_label = connected_model_label()
         for key in {f"azure:{model_label}", f"azure_openai:{model_label}", "azure", "azure_openai"}:
