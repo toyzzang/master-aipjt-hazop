@@ -28,15 +28,19 @@ type AgentEvent = {
   loading?: boolean;
   agent_id?: string;
   phase?: "start" | "progress" | "finish";
+  emphasis?: boolean;
+  parent_kind?: LogKind;
+  parent_event_key?: string;
+  event_key?: string;
 };
+
+type RunMode = "pending" | "deepagent" | "demo";
+type LogFilter = "all" | "planning" | "tool" | "self-correction";
 
 type LogKind =
   | "system"
   | "workflow"
   | "planning"
-  | "plan-candidate"
-  | "plan-evaluation"
-  | "plan-selected"
   | "agent"
   | "skill"
   | "tool"
@@ -53,6 +57,7 @@ type LogGroup = {
   detail: string;
   kind: LogKind;
   loading?: boolean;
+  emphasis?: boolean;
   children: ChildLog[];
 };
 
@@ -62,6 +67,9 @@ type ChildLog = {
   detail: string;
   kind: LogKind;
   loading?: boolean;
+  emphasis?: boolean;
+  eventKey?: string;
+  children: ChildLog[];
 };
 
 type RiskRow = Record<string, unknown>;
@@ -74,6 +82,7 @@ type HazopResult = {
   review_findings: ReviewFinding[];
   execution_plan?: Record<string, unknown>;
   output_excel?: string;
+  mode?: string;
 };
 
 function App() {
@@ -95,6 +104,10 @@ function App() {
   const [result, setResult] = useState<HazopResult | null>(null);
   const [downloadPath, setDownloadPath] = useState("");
   const [error, setError] = useState("");
+  const [runMode, setRunMode] = useState<RunMode>("pending");
+  const [runModeLabel, setRunModeLabel] = useState("실행 모드 확인 전");
+  const [logFilter, setLogFilter] = useState<LogFilter>("all");
+  const [isLogExpanded, setIsLogExpanded] = useState(false);
   const currentSubAgentId = useRef<string | null>(null);
   const agentGroupIds = useRef<Record<string, string>>({});
   const logScrollRef = useRef<HTMLDivElement | null>(null);
@@ -111,6 +124,7 @@ function App() {
 
   const isRunning = ["업로드 중", "Agent 실행 중"].includes(status);
   const generationStage = useMemo(() => getGenerationStage(logs, status), [logs, status]);
+  const visibleLogs = useMemo(() => filterLogs(logs, logFilter), [logs, logFilter]);
 
   useEffect(() => {
     if (!shouldStickToBottom.current || !logScrollRef.current) return;
@@ -159,6 +173,8 @@ function App() {
     setResult(null);
     setDownloadPath("");
     setLogs([]);
+    setRunMode("pending");
+    setRunModeLabel("실행 모드 확인 중");
     currentSubAgentId.current = null;
     agentGroupIds.current = {};
     shouldStickToBottom.current = true;
@@ -193,6 +209,11 @@ function App() {
 
     const source = new EventSource(`/api/jobs/${job_id}/events`);
     source.addEventListener("log", (message) => appendLog(JSON.parse((message as MessageEvent).data)));
+    source.addEventListener("run_mode", (message) => {
+      const data = JSON.parse((message as MessageEvent).data);
+      setRunMode(data.mode === "deepagent" ? "deepagent" : "demo");
+      setRunModeLabel(data.label || (data.mode === "deepagent" ? "DeepAgent" : "규칙 기반 Demo"));
+    });
     let terminalErrorHandled = false;
     source.addEventListener("agent_error", (message) => {
       terminalErrorHandled = true;
@@ -229,7 +250,12 @@ function App() {
         review_findings: data.review_findings || [],
         execution_plan: data.execution_plan,
         output_excel: data.output_excel,
+        mode: data.mode,
       });
+      if (data.mode) {
+        setRunMode(data.mode === "deepagent" ? "deepagent" : "demo");
+        setRunModeLabel(data.mode === "deepagent" ? "DeepAgent" : "규칙 기반 Demo");
+      }
       setDownloadPath(data.output_excel || "");
       stopAllLogSpinners();
       appendLog({ title: "생성 완료", detail: "#3/#4 초안과 결과 Excel이 준비되었습니다.", kind: "result" });
@@ -246,6 +272,10 @@ function App() {
     const progressLog = title === "Deepagent가 초안을 생성 중입니다.";
     const agentId = event.agent_id;
     const phase = event.phase;
+    const emphasis = Boolean(event.emphasis);
+    const parentKind = event.parent_kind;
+    const parentEventKey = event.parent_event_key;
+    const eventKey = event.event_key;
 
     setLogs((previous) => {
       const next = [...previous];
@@ -261,7 +291,7 @@ function App() {
             next[targetIndex] = { ...next[targetIndex], title, detail, kind, loading: true };
             return next;
           }
-          const group = makeLogGroup(title, detail, kind, true);
+          const group = makeLogGroup(title, detail, kind, true, emphasis);
           agentGroupIds.current[agentId] = group.id;
           currentSubAgentId.current = group.id;
           return [...next, group];
@@ -270,14 +300,43 @@ function App() {
         const target = next[targetIndex];
         const finishing = phase === "finish";
         const stoppedChildren = finishing
-          ? target.children.map((child) => ({ ...child, loading: false }))
+          ? target.children.map(stopChildSpinner)
           : [...target.children];
+
+        // 각 Agent 작업 중 실행된 근거 조회는 평평한 형제 로그가 아니라
+        // 현재 작업(Self-Correction/초안 생성 등) 블록 아래에 묶습니다. 같은 event_key의 시작/완료 이벤트는
+        // 새 줄을 추가하지 않고 같은 Tool 상태를 갱신합니다.
+        if (parentKind) {
+          const parentIndex = stoppedChildren.findIndex((child) =>
+            parentEventKey ? child.eventKey === parentEventKey : child.kind === parentKind,
+          );
+          if (parentIndex >= 0) {
+            const parent = stoppedChildren[parentIndex];
+            const nestedChildren = [...parent.children];
+            const nestedIndex = nestedChildren.findIndex((child) =>
+              eventKey ? child.eventKey === eventKey : child.title === title,
+            );
+            const nestedLog = makeChildLog(title, detail, kind, loading && !finishing, emphasis, eventKey);
+            if (nestedIndex >= 0) {
+              nestedChildren[nestedIndex] = { ...nestedChildren[nestedIndex], ...nestedLog, id: nestedChildren[nestedIndex].id };
+            } else {
+              nestedChildren.push(nestedLog);
+            }
+            stoppedChildren[parentIndex] = { ...parent, children: nestedChildren };
+            next[targetIndex] = { ...target, loading: !finishing, children: stoppedChildren };
+            return next;
+          }
+        }
         // Planning은 '수립 중 → 수립 완료'라는 하나의 상태이므로 같은 블록을
         // 갱신합니다. Skill/Tool의 준비와 실제 적용 결과는 별도 사실이므로
         // 새 블록으로 추가하여 실행 증거가 사라지지 않게 합니다.
-        const singletonKind = kind === "planning";
+        const singletonKind = kind === "planning" || Boolean(eventKey);
         const duplicateIndex = stoppedChildren.findIndex((child) =>
-          singletonKind ? child.kind === kind : child.title === title && child.detail === detail,
+          singletonKind
+            ? eventKey
+              ? child.eventKey === eventKey || (kind === "planning" && child.kind === "planning" && !child.eventKey)
+              : child.kind === kind
+            : child.title === title && child.detail === detail,
         );
 
         if (duplicateIndex >= 0) {
@@ -287,9 +346,11 @@ function App() {
             detail,
             kind,
             loading: loading && !finishing,
+            emphasis: stoppedChildren[duplicateIndex].emphasis || emphasis,
+            eventKey: stoppedChildren[duplicateIndex].eventKey || eventKey,
           };
         } else {
-          stoppedChildren.push(makeChildLog(title, detail, kind, loading && !finishing));
+          stoppedChildren.push(makeChildLog(title, detail, kind, loading && !finishing, emphasis, eventKey));
         }
 
         next[targetIndex] = {
@@ -310,11 +371,11 @@ function App() {
           next[progressIndex] = { ...next[progressIndex], detail, kind, loading: true };
           return next;
         }
-        return [...next, makeLogGroup(title, detail, kind, true)];
+        return [...next, makeLogGroup(title, detail, kind, true, emphasis)];
       }
 
       if (agentStart) {
-        const group = makeLogGroup(title, detail, kind, true);
+        const group = makeLogGroup(title, detail, kind, true, emphasis);
         currentSubAgentId.current = group.id;
         return [...next, group];
       }
@@ -334,13 +395,13 @@ function App() {
           next[targetIndex] = {
             ...target,
             loading: nextParentLoading,
-            children: [...baseChildren, makeChildLog(title, detail, kind, loading)],
+            children: [...baseChildren, makeChildLog(title, detail, kind, loading, emphasis)],
           };
           return next;
         }
       }
 
-      next.push(makeLogGroup(title, detail, kind));
+      next.push(makeLogGroup(title, detail, kind, false, emphasis));
       return next;
     });
   }
@@ -357,7 +418,7 @@ function App() {
       previous.map((group) => ({
         ...group,
         loading: false,
-        children: group.children.map((child) => ({ ...child, loading: false })),
+        children: group.children.map(stopChildSpinner),
       })),
     );
     currentSubAgentId.current = null;
@@ -501,23 +562,46 @@ function App() {
             )}
           </section>
 
-          <section className="panel log-panel-wrap">
+          <section className={`panel log-panel-wrap${isLogExpanded ? " is-expanded" : ""}`}>
             <div className="panel-title">
               <span>03</span>
               <h2>Agent 로그</h2>
+              <button
+                className="log-expand-button"
+                type="button"
+                onClick={() => setIsLogExpanded((value) => !value)}
+              >
+                {isLogExpanded ? "확대 닫기" : "로그 확대"}
+              </button>
             </div>
             <div className="status-row">
               <span className={isRunning ? "status-pill is-running" : "status-pill"}>
                 {isRunning ? <i aria-hidden="true" /> : null}
                 {status}
               </span>
-              <small>맨 아래에 있을 때만 자동 스크롤됩니다.</small>
+            </div>
+            <div className="log-filters" aria-label="Agent 로그 필터">
+              {([
+                ["all", "전체"],
+                ["planning", "Planning"],
+                ["tool", "Tool"],
+                ["self-correction", "Self-Correction"],
+              ] as Array<[LogFilter, string]>).map(([value, label]) => (
+                <button
+                  className={logFilter === value ? "is-active" : ""}
+                  type="button"
+                  onClick={() => setLogFilter(value)}
+                  key={value}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
             <div className="log-box" ref={logScrollRef} onScroll={handleLogScroll}>
-              {logs.length === 0 ? (
+              {visibleLogs.length === 0 ? (
                 <div className="empty-log">AI 초안생성을 누르면 Agent 로그가 여기에 쌓입니다.</div>
               ) : (
-                logs.map((item, index) => <LogCard item={item} index={index} key={item.id} />)
+                visibleLogs.map((item, index) => <LogCard item={item} index={index} key={item.id} />)
               )}
             </div>
           </section>
@@ -546,28 +630,35 @@ function Textarea({ label, value, onChange, rows }: { label: string; value: stri
 }
 
 function LogCard({ item, index }: { item: LogGroup; index: number }) {
+  const [isCollapsed, setIsCollapsed] = useState(false);
+  const planningStatus = item.children.find((child) => child.kind === "planning");
   return (
-    <article className={`log-card kind-${item.kind}`}>
-      <div className="log-card-top">
-        <span className="log-kind">{logKindLabel(item.kind)}</span>
-        <span className="log-step">STEP {String(index + 1).padStart(2, "0")}</span>
-      </div>
-      <div className="log-title-line">
-        {item.loading ? <i aria-hidden="true" /> : null}
-        <strong>{item.title}</strong>
+    <article className={`log-card kind-${item.kind}${item.emphasis ? " is-emphasis" : ""}`}>
+      <div className={item.children.length ? "log-card-header is-sticky" : "log-card-header"}>
+        <div className="log-card-top">
+          <span className="log-kind">{logKindLabel(item.kind)}</span>
+          <span className="log-step">STEP {String(index + 1).padStart(2, "0")}</span>
+          {item.children.length ? (
+            <button className="log-toggle" type="button" onClick={() => setIsCollapsed((value) => !value)}>
+              {isCollapsed ? `펼치기 (${item.children.length})` : "접기"}
+            </button>
+          ) : null}
+        </div>
+        <div className="log-title-line">
+          {item.loading ? <i aria-hidden="true" /> : null}
+          <strong>{item.title}</strong>
+        </div>
+        {planningStatus ? (
+          <div className="log-card-planning-status">
+            <span aria-hidden="true">{planningStatus.loading ? "↻" : "✓"}</span>
+            <strong>{planningStatus.title}</strong>
+          </div>
+        ) : null}
       </div>
       {item.detail ? <p>{item.detail}</p> : null}
-      {item.children.length ? (
+      {item.children.length && !isCollapsed ? (
         <div className="child-logs">
-          {item.children.map((child) => (
-            <div className={`child-log kind-${child.kind}`} key={child.id}>
-              <span>{child.loading ? <i aria-hidden="true" /> : logKindLabel(child.kind)}</span>
-              <div>
-                <strong>{child.title}</strong>
-                {child.detail ? <p>{child.detail}</p> : null}
-              </div>
-            </div>
-          ))}
+          {item.children.map((child) => <ChildLogCard child={child} key={child.id} />)}
         </div>
       ) : null}
     </article>
@@ -615,12 +706,60 @@ function ResultTable({ title, rows, emptyText }: { title: string; rows: RiskRow[
   );
 }
 
-function makeLogGroup(title: string, detail: string, kind: LogKind, loading = false): LogGroup {
-  return { id: crypto.randomUUID(), title, detail, kind, loading, children: [] };
+function makeLogGroup(title: string, detail: string, kind: LogKind, loading = false, emphasis = false): LogGroup {
+  return { id: crypto.randomUUID(), title, detail, kind, loading, emphasis, children: [] };
 }
 
-function makeChildLog(title: string, detail: string, kind: LogKind, loading = false): ChildLog {
-  return { id: crypto.randomUUID(), title, detail, kind, loading };
+function ChildLogCard({ child, nested = false }: { child: ChildLog; nested?: boolean }) {
+  const stickyCurrentWork = !nested && child.loading && child.children.length > 0;
+  return (
+    <div className={`child-log kind-${child.kind}${child.emphasis ? " is-emphasis" : ""}${nested ? " is-nested" : ""}`}>
+      <div className={`child-log-summary${stickyCurrentWork ? " is-current-sticky" : ""}`}>
+        <span>{child.loading ? <i aria-hidden="true" /> : logKindLabel(child.kind)}</span>
+        <div>
+          <strong>{child.title}</strong>
+          {child.detail ? <p>{child.detail}</p> : null}
+        </div>
+      </div>
+      {child.children.length ? (
+        <div className="nested-child-logs">
+          {child.children.map((nestedChild) => <ChildLogCard child={nestedChild} nested key={nestedChild.id} />)}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function makeChildLog(
+  title: string,
+  detail: string,
+  kind: LogKind,
+  loading = false,
+  emphasis = false,
+  eventKey?: string,
+): ChildLog {
+  return { id: crypto.randomUUID(), title, detail, kind, loading, emphasis, eventKey, children: [] };
+}
+
+function stopChildSpinner(child: ChildLog): ChildLog {
+  return { ...child, loading: false, children: child.children.map(stopChildSpinner) };
+}
+
+function filterLogs(logs: LogGroup[], filter: LogFilter): LogGroup[] {
+  if (filter === "all") return logs;
+  const matches = (kind: LogKind) => {
+    if (filter === "planning") return kind === "planning";
+    return kind === filter;
+  };
+  const filterChildren = (children: ChildLog[]): ChildLog[] => children.flatMap((child) => {
+    const nested = filterChildren(child.children);
+    return matches(child.kind) ? [{ ...child, children: child.children }] : nested.length ? [{ ...child, children: nested }] : [];
+  });
+  return logs.flatMap((group) => {
+    if (matches(group.kind)) return [group];
+    const children = filterChildren(group.children);
+    return children.length ? [{ ...group, children }] : [];
+  });
 }
 
 function nodeKey(order: number, name: string) {
@@ -700,9 +839,6 @@ function logKindLabel(kind: LogKind) {
     system: "시스템",
     workflow: "Workflow",
     planning: "Planning",
-    "plan-candidate": "Plan 후보",
-    "plan-evaluation": "Plan 평가",
-    "plan-selected": "Plan 선택",
     agent: "Agent",
     skill: "Skill",
     tool: "Tool",

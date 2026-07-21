@@ -1,0 +1,29 @@
+{
+  "reference_id": "STD-HAZOP-HF-ETCH-2026-001",
+  "title": "HF Etch 및 배기설비 표준 HAZOP",
+  "process": "HF Etch and Exhaust",
+  "materials": ["HF", "Nitrogen"],
+  "revision": "2026-01",
+  "rows": [
+    {
+      "node": "HF Chemical Supply",
+      "parameter": "Containment",
+      "guideword": "Leak",
+      "cause": "이중배관 연결부 또는 밸브 Seal 손상",
+      "consequence": "HF 노출, 중대한 화학화상과 흡입 피해",
+      "safeguards": ["Leak Sensor", "이중배관", "긴급차단", "비상샤워·세안"],
+      "frequency_reference": 2,
+      "severity_reference": 4
+    },
+    {
+      "node": "Exhaust Scrubber",
+      "parameter": "Flow",
+      "guideword": "No",
+      "cause": "배기 Fan 정지, Damper 고장 또는 Scrubber 막힘",
+      "consequence": "공정실 HF 증기 체류와 작업자 노출",
+      "safeguards": ["Exhaust Low Flow Interlock", "차압 알람", "예비 Fan"],
+      "frequency_reference": 2,
+      "severity_reference": 4
+    }
+  ]
+}

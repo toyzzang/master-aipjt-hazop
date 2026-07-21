@@ -404,6 +404,65 @@ textarea {
   line-height: 1.35;
 }
 
+.run-mode-badge {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 7px 11px;
+  font-size: 12px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.run-mode-badge.mode-deepagent {
+  border-color: #a9bed2;
+  background: #e8f0f8;
+  color: #315f86;
+}
+
+.run-mode-badge.mode-demo {
+  border-color: #f0c98b;
+  background: #fff0d8;
+  color: #8a4b00;
+}
+
+.run-mode-badge.mode-pending {
+  background: #edf1f5;
+  color: #4d5b68;
+}
+
+.log-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-bottom: 10px;
+}
+
+.log-filters button,
+.log-expand-button,
+.log-toggle {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #ffffff;
+  color: var(--muted);
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.log-filters button.is-active {
+  border-color: #111111;
+  background: #111111;
+  color: #ffffff;
+}
+
+.log-expand-button {
+  margin-left: auto;
+  color: var(--ink);
+}
+
 .log-box {
   flex: 1;
   min-height: 0;
@@ -437,6 +496,13 @@ textarea {
   padding: 12px 13px;
 }
 
+.log-card.is-emphasis,
+.child-log.is-emphasis {
+  border-color: #e4eaf1;
+  background: #ffffff;
+  box-shadow: none;
+}
+
 .log-card.kind-error,
 .log-card.kind-warning,
 .log-card.kind-workflow,
@@ -456,6 +522,28 @@ textarea {
   justify-content: flex-start;
   gap: 10px;
   margin-bottom: 7px;
+}
+
+.log-card-header.is-sticky {
+  position: sticky;
+  top: -10px;
+  z-index: 4;
+  margin: -4px -5px 0;
+  border-bottom: 1px solid #e4eaf1;
+  background: rgba(255, 255, 255, 0.97);
+  padding: 4px 5px 9px;
+  backdrop-filter: blur(6px);
+}
+
+.log-card-header.is-sticky .log-title-line strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-toggle {
+  margin-left: auto;
+  padding: 4px 8px;
 }
 
 .log-kind,
@@ -481,14 +569,7 @@ textarea {
 }
 
 .log-card.kind-planning .log-kind,
-.child-log.kind-planning > span,
-.log-card.kind-plan-candidate .log-kind,
-.log-card.kind-plan-evaluation .log-kind {
-  background: #e4f4ed;
-  color: #176149;
-}
-
-.log-card.kind-plan-selected .log-kind {
+.child-log.kind-planning > span {
   background: #e4f4ed;
   color: #176149;
 }
@@ -585,6 +666,31 @@ textarea {
   line-height: 1.35;
 }
 
+.log-card-planning-status {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  margin-top: 8px;
+  border-top: 1px solid #edf1f5;
+  padding-top: 7px;
+  color: #176149;
+  font-size: 12px;
+}
+
+.log-card-planning-status > span {
+  flex: 0 0 auto;
+  font-weight: 900;
+}
+
+.log-card-planning-status > strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .log-card p,
 .child-log p {
   margin: 5px 0 0;
@@ -602,14 +708,56 @@ textarea {
 }
 
 .child-log {
-  display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
-  gap: 10px;
-  align-items: start;
+  display: block;
   border: 1px solid #edf1f5;
   border-radius: 8px;
   background: #ffffff;
   padding: 9px 10px;
+}
+
+.child-log-summary {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.child-log-summary > span {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  justify-content: center;
+  align-self: start;
+  border-radius: 999px;
+  padding: 5px 9px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 900;
+  line-height: 1;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.child-log-summary > span i {
+  width: 13px;
+  height: 13px;
+  border: 2px solid #d9e0e8;
+  border-top-color: #111111;
+  border-radius: 999px;
+  animation: spin 0.8s linear infinite;
+}
+
+.child-log-summary.is-current-sticky {
+  position: sticky;
+  top: 62px;
+  z-index: 3;
+  margin: -5px -6px 0;
+  border: 1px solid #dfe7ef;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.98);
+  padding: 7px 8px;
+  box-shadow: 0 3px 10px rgba(26, 45, 64, 0.07);
+  backdrop-filter: blur(6px);
 }
 
 .child-log > span {
@@ -633,6 +781,89 @@ textarea {
   font-size: 13px;
 }
 
+.nested-child-logs {
+  position: relative;
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+  padding-left: 18px;
+}
+
+.nested-child-logs::before {
+  position: absolute;
+  top: 0;
+  bottom: 12px;
+  left: 6px;
+  width: 1px;
+  background: #cfd8e2;
+  content: "";
+}
+
+.child-log.is-nested {
+  position: relative;
+  border-color: #dce8f2;
+  background: #f5f9fd;
+}
+
+.child-log.is-nested.is-emphasis {
+  border-color: #dce8f2;
+  background: #f5f9fd;
+}
+
+/* 카드 배경은 흰색으로 두되, 동그란 분류 배지는 종류별 기존 색상을 유지합니다. */
+.child-log.kind-planning .child-log-summary > span {
+  background: #e4f4ed;
+  color: #176149;
+}
+
+.child-log.kind-self-correction .child-log-summary > span {
+  background: #e4f4ed;
+  color: #176149;
+}
+
+.child-log.kind-system .child-log-summary > span {
+  background: #edf1f5;
+  color: #4d5b68;
+}
+
+.child-log.kind-workflow .child-log-summary > span {
+  background: #e4f3f7;
+  color: #176278;
+}
+
+.child-log.kind-agent .child-log-summary > span,
+.child-log.kind-validation .child-log-summary > span,
+.child-log.kind-result .child-log-summary > span {
+  background: #e8e9eb;
+  color: #17191c;
+}
+
+.child-log.kind-skill .child-log-summary > span,
+.child-log.kind-tool .child-log-summary > span {
+  background: #fff4c7;
+  color: #765500;
+}
+
+.child-log.kind-warning .child-log-summary > span {
+  background: #fff0d8;
+  color: #8a4b00;
+}
+
+.child-log.kind-error .child-log-summary > span {
+  background: #fde8ec;
+  color: #a31d38;
+}
+
+.child-log.is-nested::before {
+  position: absolute;
+  top: 18px;
+  left: -13px;
+  width: 12px;
+  height: 1px;
+  background: #cfd8e2;
+  content: "";
+}
+
 .confirmation-required {
   color: #c52233;
   font-weight: 900;
@@ -646,6 +877,31 @@ textarea {
 
 .output-grid .log-panel-wrap {
   height: 700px;
+}
+
+.log-panel-wrap.is-expanded {
+  position: fixed;
+  inset: 18px;
+  z-index: 1000;
+  height: auto;
+  min-height: 0;
+  padding: 22px;
+  border-color: #bcc8d4;
+  box-shadow: 0 24px 80px rgba(17, 22, 28, 0.24);
+}
+
+.log-panel-wrap.is-expanded .log-box {
+  font-size: 16px;
+}
+
+.log-panel-wrap.is-expanded .log-title-line strong {
+  font-size: 18px;
+}
+
+.log-panel-wrap.is-expanded .log-card p,
+.log-panel-wrap.is-expanded .child-log p {
+  font-size: 15px;
+  line-height: 1.6;
 }
 
 .result-header {

@@ -6,9 +6,17 @@ from deepagents.middleware.skills import _list_skills
 from pydantic import ValidationError
 
 from app.hazop_engine.agents.deepagent_factory import _filesystem_permissions, _skill_paths
-from app.hazop_engine.context import AgentTrace, EngineEvent, HazopDraftContext
+from app.hazop_engine.context import (
+    AgentTrace,
+    EngineEvent,
+    HazopDraftContext,
+    IncidentHistoryContext,
+    StandardHazopContext,
+)
 from app.hazop_engine.planning import build_execution_plan, plan_prompt
+from app.hazop_engine.tools.incident_history_tools import lookup_incident_history
 from app.hazop_engine.tools.validation_tools import parse_risk_rows, validate_and_calculate_risk_rows
+from app.hazop_engine.tools.standard_hazop_tools import lookup_standard_hazop
 from app.hazop_engine.workflow import _describe_deepagent_exception, generate_hazop_draft
 from app.schemas.hazop import (
     ActionPlanRow,
@@ -94,7 +102,7 @@ def test_generate_hazop_draft_demo_fallback(monkeypatch):
     assert "action-plan-agent demo fallback을 실행합니다." in titles
 
 
-def test_plan_compares_limited_strategies_and_applies_selected_strategy():
+def test_execution_plan_contains_only_fixed_workflow_and_tool_rules():
     context = HazopDraftContext(
         input_data=HazopInput(
             maker="ASM",
@@ -119,46 +127,52 @@ def test_plan_compares_limited_strategies_and_applies_selected_strategy():
     context.execution_plan = plan
 
     assert len(plan.steps) == 5
-    assert [candidate.candidate_id for candidate in plan.candidates] == ["A", "B", "C"]
-    assert plan.selected_candidate_id == "A"
-    assert "고위험 물질 신호 발견" in plan.selected_candidate().observed_conditions
-    assert not hasattr(plan.selected_candidate(), "score")
+    assert not hasattr(plan, "candidates")
+    assert not hasattr(plan, "selected_candidate_id")
     prompt = plan_prompt(context)
     assert plan.plan_id in prompt
-    assert "MSDS 우선 + 사고이력 보완" in prompt
-    assert "근거 우선순위: MSDS → 사용자 사고·정비 이력 → 표준 HAZOP" in prompt
-    assert "lookup_incident_history" in prompt
+    assert "고정 Workflow" in prompt
+    assert "입력 검증" in prompt
+    assert "독립 검토 및 수정" in prompt
+    assert "사고이력 조회" in prompt
 
 
-def test_plan_selection_changes_with_available_evidence():
-    common = {
-        "nodes": [NodeRow(node_order=1, node_name="DI Water 공급 탱크")],
-        "guidewords": [GuidewordRow(node_order=1, node_name="DI Water 공급 탱크", parameter="Flow", guideword="No")],
-        "msds_context": {
-            "water": MsdsSummary(material="DI Water", hazards=["고유해성 낮음"], handling=["누수 관리"], source="test")
-        },
+def test_local_standard_hazop_document_returns_real_reference_rows():
+    result = lookup_standard_hazop(
+        "STD-HAZOP-NH3-REFRIGERATION-2026-001",
+        "NH3 Receiver containment leak compressor high pressure machine room ammonia",
+    )
+
+    assert result["document_title"] == "암모니아 냉동설비 표준 HAZOP"
+    assert result["revision"] == "2026-01"
+    assert result["matched_count"] >= 2
+    assert any(row["node"] == "NH3 Receiver" for row in result["matched_rows"])
+    assert any("참조 빈도=" in evidence and "강도=" in evidence for evidence in result["evidence"])
+
+
+def test_local_incident_history_returns_relevant_ammonia_records():
+    result = lookup_incident_history(
+        "ColdChain NH3 Refrigeration ammonia receiver compressor condenser leak pressure high"
+    )
+
+    assert result["dataset_title"] == "HAZOP PoC 사고·정비 이력 샘플"
+    assert "합성 샘플" in result["data_notice"]
+    assert result["matched_count"] >= 3
+    assert result["frequency_hint"] == 3
+    assert {record["record_id"] for record in result["matched_records"]} >= {
+        "INC-NH3-001",
+        "MNT-NH3-002",
+        "ALM-NH3-003",
     }
-    history_context = HazopDraftContext(
-        input_data=HazopInput(
-            maker="CleanTech",
-            model="CT-DIW-100",
-            materials="DI Water",
-            incident_maintenance_history="최근 1년 펌프 정지 3회",
-        ),
-        **common,
-    )
-    standard_context = HazopDraftContext(
-        input_data=HazopInput(
-            maker="CleanTech",
-            model="CT-DIW-100",
-            materials="DI Water",
-            standard_hazop_link="STD-DIW-001",
-        ),
-        **common,
-    )
+    assert all("PoC 합성 사고·정비 이력" == record["source"] for record in result["matched_records"])
 
-    assert build_execution_plan(history_context).selected_candidate_id == "B"
-    assert build_execution_plan(standard_context).selected_candidate_id == "C"
+
+def test_local_incident_history_returns_confirmation_when_no_record_matches():
+    result = lookup_incident_history("lithium battery thermal runaway cell venting")
+
+    assert result["matched_count"] == 0
+    assert result["frequency_hint"] is None
+    assert "확인 필요" in result["evidence"][0]
 
 
 def test_describe_deepagent_connection_error(monkeypatch):
@@ -367,26 +381,63 @@ def test_independent_review_result_is_reflected_before_action_plan(monkeypatch):
         ) == 1
 
     titles = [event.title for event in result.events]
-    assert titles[0] == "risk-draft-agent (위험성평가 초안 작성) Agent를 실행합니다."
     assert result.execution_plan is not None
-    assert not any(title.startswith("Plan ") for title in titles)
+    assert not any("Workflow Planner" in title for title in titles)
+    assert not any(event.kind in {"plan-candidate", "plan-evaluation", "plan-selected"} for event in result.events)
     assert "Deepagent HAZOP Engine을 준비했습니다." not in titles
     assert not any("스킬을 실행 기준으로 등록합니다." in title for title in titles)
     assert not any("Context를 구성합니다." in title for title in titles)
     assert not any(title.endswith("Tool을 연결합니다.") for title in titles)
     assert not any("read_file" in f"{event.title} {event.detail}" for event in result.events)
-    review_summaries = [
-        event for event in result.events if event.title == "초안 검토 및 보완 결과 · 담당자 확인 필요 1건"
-    ]
-    assert len(review_summaries) == 1
-    assert review_summaries[0].detail == "총 1건을 보완했습니다. 담당자 확인이 필요한 항목은 1건입니다."
+    assert not any(event.title.startswith("초안 검토 및 보완 결과") for event in result.events)
     correction_summary = next(
         event for event in result.events if event.title == "Self-Correction: 독립 검토와 수정 반영을 완료했습니다."
     )
-    assert "수정 1건" in correction_summary.detail
-    assert "조치계획 대상 변경 1건" in correction_summary.detail
+    assert "검토 의견 1건" in correction_summary.detail
+    assert "실제 수정 1개" in correction_summary.detail
+    assert "조치계획 대상 변경 1개" in correction_summary.detail
+    assert "① 조치계획 대상 변경" in correction_summary.detail
+    assert correction_summary.event_key == "risk-review-agent:self-correction-summary"
+    correction_detail = next(event for event in result.events if event.title.startswith("Self-Correction 대표 변경"))
+    assert "위험도: 3×2=6 → 3×4=12 (시스템 재계산)" in correction_detail.detail
+    assert "조치계획 대상: 아니오 → 예" in correction_detail.detail
+    assert correction_detail.emphasis
+    assert correction_detail.parent_event_key == correction_summary.event_key
     assert all(finding.risk_assessment_no != "전체" for finding in result.review_findings)
     assert not any("검토 의견:" in event.title for event in result.events)
+
+
+def test_review_applies_only_rows_named_by_findings_and_global_confirmation_changes_no_row():
+    import app.hazop_engine.workflow as workflow
+
+    first = _risk_row(severity=2)
+    second = _risk_row(severity=2).model_copy(update={"no": 2, "cause": "초안 원인 2"})
+    rewritten_first = first.model_copy(update={"severity": 4, "cause": "실제 지적에 따른 수정"})
+    rewritten_second = second.model_copy(update={"cause": "지적 없이 문장만 다시 작성"})
+    row_finding = ReviewFinding(
+        risk_assessment_no=1,
+        category="강도 과소평가",
+        message="평가 1의 강도 근거가 낮습니다.",
+        resolution="강도와 원인을 보완했습니다.",
+    )
+    global_confirmation = ReviewFinding(
+        risk_assessment_no="전체",
+        category="공통 확인",
+        message="현장 담당자가 최종 확인해야 합니다.",
+        resolution="검토표에 확인사항을 남깁니다.",
+        requires_confirmation=True,
+    )
+
+    scoped = workflow._apply_reviewed_rows_for_findings(
+        [first, second],
+        [rewritten_first, rewritten_second],
+        [row_finding, global_confirmation],
+    )
+    confirmed = workflow._apply_confirmation_findings(scoped, [global_confirmation])
+
+    assert scoped[0].cause == "실제 지적에 따른 수정"
+    assert scoped[1].cause == "초안 원인 2"
+    assert confirmed == scoped
 
 
 def test_draft_review_and_action_use_separate_llm_agents_with_lookup_tools(monkeypatch):
@@ -453,7 +504,7 @@ def test_draft_review_and_action_use_separate_llm_agents_with_lookup_tools(monke
 
     assert [name for name, _tools in created] == ["risk-draft-agent", "risk-review-agent", "action-plan-agent"]
     for _name, tools in created:
-        assert {"lookup_msds_detail", "lookup_incident_history", "lookup_standard_hazop"} <= tools
+        assert tools == {"lookup_msds_detail", "lookup_incident_history"}
 
 
 def test_skill_read_trace_is_shown_as_summary_without_internal_path():
@@ -479,6 +530,204 @@ def test_skill_read_trace_is_shown_as_summary_without_internal_path():
     assert len(recorded) == 1
     assert recorded[0].title == "Tool 실행 결과를 확인했습니다."
     assert not any("read_file" in f"{event.title} {event.detail}" for event in recorded)
+
+
+def test_live_tool_trace_shows_purpose_input_and_result(monkeypatch):
+    import app.hazop_engine.workflow as workflow
+
+    context = HazopDraftContext(
+        input_data=HazopInput(maker="ASM", model="Epsilon3200", materials="Silane"),
+        nodes=[NodeRow(node_order=1, node_name="Gas Cabinet")],
+        guidewords=[GuidewordRow(node_order=1, node_name="Gas Cabinet", parameter="Containment", guideword="Leak")],
+        msds_context={
+            "silane": MsdsSummary(
+                material="Silane",
+                hazards=["공기 중 자연발화 가능"],
+                handling=["긴급차단밸브"],
+                source="test",
+            )
+        },
+    )
+    context.execution_plan = build_execution_plan(context)
+    planning_call = {
+        "id": "plan-1",
+        "name": "write_todos",
+        "args": {"todos": [{"content": "근거 확인", "status": "completed"}]},
+    }
+    tool_call = {
+        "id": "tool-1",
+        "name": "lookup_msds_detail",
+        "args": {"material": "Silane", "requested_sections": ["hazards"]},
+    }
+
+    class FakeAgent:
+        def invoke(self, _payload):
+            return {
+                "messages": [
+                    {"tool_calls": [planning_call, tool_call]},
+                    {"tool_call_id": "plan-1", "status": "success", "content": "updated"},
+                    {
+                        "tool_call_id": "tool-1",
+                        "status": "success",
+                        "content": '{"source":"KOSHA MSDS chem_id=1","hazards":["H220"]}',
+                    },
+                ]
+            }
+
+    recorded = []
+
+    async def progress(event):
+        recorded.append(event)
+
+    asyncio.run(
+        workflow._invoke_agent_with_live_stage(
+            FakeAgent(),
+            {"messages": []},
+            context=context,
+            events=[],
+            progress=progress,
+            agent_id="risk-draft-agent",
+            required_skills=set(),
+            skill_detail="없음",
+            tool_detail="MSDS 조회",
+            context_title="Context 준비",
+            context_detail="테스트 Context",
+            activity_title="Agent 실행",
+            activity_detail="테스트 실행",
+            activity_kind="agent",
+        )
+    )
+
+    started = next(event for event in recorded if event.kind == "tool" and "호출 목적:" in event.detail)
+    completed = next(event for event in recorded if event.kind == "tool" and "실행 결과:" in event.detail)
+    assert started.title == "MSDS 상세 위험성 조회"
+    assert started.parent_kind == "agent"
+    assert started.parent_event_key == "risk-draft-agent:activity"
+    assert started.event_key == "tool-1"
+    assert "호출 목적:" in started.detail
+    assert '"material": "Silane"' in started.detail
+    assert started.emphasis
+    assert "KOSHA MSDS" in completed.detail
+    assert "판단 반영 위치:" in completed.detail
+
+
+def test_self_correction_groups_parallel_tools_and_updates_progress():
+    import app.hazop_engine.workflow as workflow
+
+    context = HazopDraftContext(
+        input_data=HazopInput(maker="ColdChain", model="NH3", materials="Ammonia"),
+        nodes=[NodeRow(node_order=1, node_name="NH3 Receiver")],
+        guidewords=[GuidewordRow(node_order=1, node_name="NH3 Receiver", parameter="Containment", guideword="Leak")],
+        msds_context={
+            "ammonia": MsdsSummary(material="Ammonia", hazards=["급성 독성"], handling=["누출 감지"], source="test")
+        },
+    )
+    context.execution_plan = build_execution_plan(context)
+    planning_call = {
+        "id": "plan-1",
+        "name": "write_todos",
+        "args": {"todos": [{"content": "전체 Row 검토", "status": "completed"}]},
+    }
+    incident_call = {"id": "tool-incident", "name": "lookup_incident_history", "args": {"query": "NH3 leak"}}
+    msds_call = {
+        "id": "tool-msds",
+        "name": "lookup_msds_detail",
+        "args": {"material": "Ammonia", "requested_sections": ["hazards"]},
+    }
+    first = {"messages": [{"tool_calls": [planning_call, incident_call, msds_call]}]}
+    second = {
+        "messages": [
+            *first["messages"],
+            {"tool_call_id": "tool-incident", "status": "success", "content": '{"matched_count":1}'},
+        ]
+    }
+    third = {
+        "messages": [
+            *second["messages"],
+            {"tool_call_id": "tool-msds", "status": "success", "content": '{"material":"Ammonia"}'},
+        ]
+    }
+
+    class FakeStreamingAgent:
+        def stream(self, _payload, stream_mode):
+            assert stream_mode == "values"
+            yield first
+            yield second
+            yield third
+
+    recorded = []
+
+    async def progress(event):
+        recorded.append(event)
+
+    asyncio.run(
+        workflow._invoke_agent_with_live_stage(
+            FakeStreamingAgent(),
+            {"messages": []},
+            context=context,
+            events=[],
+            progress=progress,
+            agent_id="risk-review-agent",
+            required_skills=set(),
+            skill_detail="없음",
+            tool_detail="근거 조회",
+            context_title="Context 준비",
+            context_detail="테스트 Context",
+            activity_title="Self-Correction · 전체 15건 비교 검토 중",
+            activity_detail="전체 Row를 비교합니다.",
+            activity_kind="self-correction",
+        )
+    )
+
+    progress_details = [event.detail for event in recorded if event.event_key == "risk-review-agent:activity"]
+    assert any("병렬 근거 조회 · 0/2 완료" in detail for detail in progress_details)
+    assert any("병렬 근거 조회 · 1/2 완료" in detail for detail in progress_details)
+    assert any("병렬 근거 조회 · 2/2 완료" in detail for detail in progress_details)
+    tool_events = [event for event in recorded if event.parent_kind == "self-correction"]
+    assert {event.event_key for event in tool_events} == {"tool-incident", "tool-msds"}
+    assert all(event.parent_event_key == "risk-review-agent:activity" for event in tool_events)
+    assert {event.title for event in tool_events} == {"사고·정비 이력 조회", "MSDS 상세 위험성 조회"}
+    final_progress = [event for event in recorded if event.event_key == "risk-review-agent:activity"][-1]
+    assert final_progress.loading is True
+    assert "원인→결과 연결" in final_progress.detail
+
+
+def test_planning_completion_counts_only_explicit_completed_todos():
+    import app.hazop_engine.workflow as workflow
+
+    assert workflow._planning_completion(
+        "1. 입력 확인 [완료]\n2. 근거 조회 [진행 중]\n3. 결과 생성 [대기]"
+    ) == (1, 3)
+
+
+def test_english_review_todos_are_localized_and_successful_return_closes_last_item():
+    import app.hazop_engine.workflow as workflow
+
+    english_items = [
+        "Read required SKILL.md files for hazop-risk-review, severity-estimation, and standard-hazop-comparison",
+        "Verify input combination preservation and review all #3 rows against causes and safeguards",
+        "Decide whether additional lookup tools are necessary and gather only missing evidence if needed",
+        "Apply only necessary corrections to affected risk_rows while preserving unchanged rows exactly",
+        "Return full risk_rows and review_findings with per-modified-row findings",
+    ]
+    localized = [workflow._localize_todo_content(item) for item in english_items]
+    detail = "\n".join(
+        f"{index}. {content} [{'완료' if index < 5 else '진행 중'}]"
+        for index, content in enumerate(localized, start=1)
+    )
+    finalized = workflow._finalize_returned_planning_detail(detail)
+
+    assert all(any("가" <= char <= "힣" for char in content) for content in localized)
+    assert "[완료 · 시스템 확인]" in finalized
+    assert workflow._planning_completion(finalized) == (5, 5)
+
+
+def test_planning_does_not_hide_multiple_incomplete_steps():
+    import app.hazop_engine.workflow as workflow
+
+    detail = "1. 입력 확인 [완료]\n2. 근거 조회 [진행 중]\n3. 결과 반환 [대기]"
+
+    assert workflow._finalize_returned_planning_detail(detail) == detail
 
 
 def test_excel_validation_failure_is_sent_as_agent_error(monkeypatch, tmp_path):
@@ -510,7 +759,7 @@ def test_excel_validation_failure_is_sent_as_agent_error(monkeypatch, tmp_path):
     assert "가이드워드 형식" in events[-1].data["message"]
 
 
-def test_workflow_fetches_each_input_material_once_before_agents(monkeypatch, tmp_path):
+def test_workflow_fetches_each_input_material_once_before_agents(monkeypatch, tmp_path, caplog):
     import app.services.agent as service_agent
 
     calls: list[str] = []
@@ -536,12 +785,18 @@ def test_workflow_fetches_each_input_material_once_before_agents(monkeypatch, tm
     monkeypatch.setattr(service_agent, "export_result_excel", lambda *_args: None)
     monkeypatch.setattr(service_agent, "_log_delay", no_delay)
     monkeypatch.setattr(service_agent, "azure_openai_configured", lambda: False)
+    caplog.set_level("INFO", logger="uvicorn.error")
 
     async def consume():
         return [
             event
             async for event in service_agent.run_hazop_agent(
-                HazopInput(maker="ASM", model="Epsilon3200", materials="Silane, Hydrogen, Silane"),
+                HazopInput(
+                    maker="ASM",
+                    model="Epsilon3200",
+                    materials="Silane, Hydrogen, Silane",
+                    standard_hazop_link="STD-HAZOP-SILANE-GAS-2026-001",
+                ),
                 tmp_path / "input.xlsx",
                 tmp_path / "requests",
             )
@@ -550,9 +805,37 @@ def test_workflow_fetches_each_input_material_once_before_agents(monkeypatch, tm
     events = asyncio.run(consume())
 
     assert calls == ["Silane", "Hydrogen"]
-    assert any(event.data.get("title") == "Workflow 필수 MSDS 조회를 시작합니다." for event in events)
+    assert any(event.data.get("title") == "Workflow 필수 MSDS 조회 · 고유 물질 전체 확인" for event in events)
+    incident_event = next(
+        event for event in events
+        if event.data.get("title") == "로컬 사고·정비 이력 저장소를 조회했습니다."
+    )
+    assert "유사 이력 1건" in incident_event.data["detail"]
+    assert "PoC 합성" in incident_event.data["detail"]
+    assert sum(
+        event.data.get("title") == "로컬 표준 HAZOP 문서를 조회했습니다."
+        for event in events
+    ) == 1
+    msds_children = [
+        event.data for event in events
+        if event.data.get("agent_id") == "msds-lookup-workflow" and str(event.data.get("event_key", "")).startswith("msds:")
+    ]
+    assert {event["event_key"] for event in msds_children} == {"msds:silane", "msds:hydrogen"}
+    assert all(any(item["event_key"] == event_key and item["loading"] is False for item in msds_children) for event_key in {"msds:silane", "msds:hydrogen"})
     assert not any("위험도를 계산했습니다" in event.data.get("title", "") for event in events)
     assert sum(event.data.get("title") == "최종 결과의 시스템 검증을 완료했습니다." for event in events) == 1
+    assert any(event.event == "run_mode" and event.data["mode"] == "demo" for event in events)
+    done_event = next(event for event in events if event.event == "done")
+    assert done_event.data["risk_rows"][0]["frequency_evidence"][0]["source"] == "로컬 사고·정비 이력 JSON + 빈도 기준표"
+    assert any("AGENT_TRACE" in record.message and '"request_id"' in record.message for record in caplog.records)
+    # Demo fallback에는 모델이 세운 Agent 계획이 없으므로 가짜 Planning 로그를 만들지 않는다.
+    # 대신 실제로 수행된 구조화 이벤트가 백엔드 콘솔에도 남는지만 확인한다.
+    assert any('"kind": "workflow"' in record.message for record in caplog.records)
+    assert not any(
+        f'"kind": "{kind}"' in record.message
+        for record in caplog.records
+        for kind in {"plan-candidate", "plan-evaluation", "plan-selected"}
+    )
 
 
 def test_agent_progress_log_delay_uses_configured_random_range(monkeypatch):
@@ -586,6 +869,80 @@ def test_agent_progress_log_delay_uses_configured_random_range(monkeypatch):
     asyncio.run(service_agent._progress_log_delay(EngineEvent(title="시스템 검증", detail="test")))
 
     assert sleeps == [1.4, 1.4]
+
+
+def test_preloaded_evidence_results_are_inside_draft_tool_aggregation_block():
+    import app.hazop_engine.workflow as workflow
+
+    context = HazopDraftContext(
+        input_data=HazopInput(
+            maker="ColdChain",
+            model="NH3-Refrigeration",
+            materials="Ammonia",
+            standard_hazop_link="STD-HAZOP-NH3-REFRIGERATION-2026-001",
+        ),
+        nodes=[NodeRow(node_order=1, node_name="NH3 Receiver")],
+        guidewords=[GuidewordRow(node_order=1, node_name="NH3 Receiver", parameter="Containment", guideword="Leak")],
+        incident_history_context=IncidentHistoryContext(
+            matched_count=2,
+            frequency_hint=3,
+            dataset_title="HAZOP PoC 사고·정비 이력 샘플",
+            data_notice="PoC 합성 샘플",
+            evidence=["ALM-NH3-003 · 빈도 참고=3"],
+        ),
+        standard_hazop_context=StandardHazopContext(
+            reference_id="STD-HAZOP-NH3-REFRIGERATION-2026-001",
+            document_title="암모니아 냉동설비 표준 HAZOP",
+            revision="2026-01",
+            matched_count=4,
+            evidence=["NH3 Receiver · Containment/Leak · 참조 빈도=2, 강도=4"],
+        ),
+    )
+
+    class FakeAgent:
+        def invoke(self, _payload):
+            return {
+                "messages": _successful_skill_messages(
+                    ["hazop-risk-draft", "frequency-estimation", "severity-estimation"]
+                )
+            }
+
+    recorded = []
+
+    async def progress(event):
+        recorded.append(event)
+
+    asyncio.run(
+        workflow._invoke_agent_with_live_stage(
+            FakeAgent(),
+            {"messages": []},
+            context=context,
+            events=[],
+            progress=progress,
+            agent_id="risk-draft-agent",
+            required_skills={"hazop-risk-draft", "frequency-estimation", "severity-estimation"},
+            skill_detail="테스트 Skill",
+            tool_detail="테스트 Tool",
+            context_title="Context 구성",
+            context_detail="테스트 Context",
+            activity_title="Tool 결과를 취합해 Agent 결과를 생성 중입니다.",
+            activity_detail="구조화 결과를 생성하고 검증하는 중입니다.",
+            activity_kind="agent",
+        )
+    )
+
+    activity = next(event for event in recorded if event.event_key == "risk-draft-agent:activity")
+    assert activity.title == "Tool 결과를 취합해 Agent 결과를 생성 중입니다."
+    evidence_events = [
+        event for event in recorded
+        if event.event_key in {"workflow:incident-history", "workflow:standard-hazop"}
+    ]
+    assert {event.title for event in evidence_events} == {
+        "로컬 사고·정비 이력 저장소를 조회했습니다.",
+        "로컬 표준 HAZOP 문서를 조회했습니다.",
+    }
+    assert all(event.parent_event_key == "risk-draft-agent:activity" for event in evidence_events)
+    assert all(event.parent_kind == "agent" for event in evidence_events)
 
 
 def _risk_row(*, severity: int) -> RiskAssessmentRow:

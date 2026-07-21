@@ -1,0 +1,49 @@
+{
+  "reference_id": "STD-HAZOP-NH3-REFRIGERATION-2026-001",
+  "title": "암모니아 냉동설비 표준 HAZOP",
+  "process": "NH3 Refrigeration",
+  "materials": ["Ammonia", "NH3"],
+  "revision": "2026-01",
+  "rows": [
+    {
+      "node": "NH3 Receiver",
+      "parameter": "Containment",
+      "guideword": "Leak",
+      "cause": "노즐·플랜지 가스켓 열화, 진동 또는 부식",
+      "consequence": "암모니아 독성가스 확산, 작업자 흡입 노출 및 대피",
+      "safeguards": ["암모니아 감지기", "긴급차단밸브", "기계실 환기", "비상대응절차"],
+      "frequency_reference": 2,
+      "severity_reference": 4
+    },
+    {
+      "node": "NH3 Compressor",
+      "parameter": "Pressure",
+      "guideword": "High",
+      "cause": "응축기 냉각 상실, 토출밸브 폐쇄 또는 제어 실패",
+      "consequence": "토출 배관·수액기 과압과 안전밸브 작동, 암모니아 방출",
+      "safeguards": ["High Pressure Trip", "안전밸브", "냉각수 유량 알람"],
+      "frequency_reference": 2,
+      "severity_reference": 4
+    },
+    {
+      "node": "Condenser",
+      "parameter": "Temperature",
+      "guideword": "High",
+      "cause": "냉각수 공급 저하, 팬 정지 또는 열교환면 오염",
+      "consequence": "응축압력 상승과 Compressor High Pressure Trip",
+      "safeguards": ["냉각수 Low Flow Alarm", "토출압 High Alarm", "예방정비"],
+      "frequency_reference": 3,
+      "severity_reference": 3
+    },
+    {
+      "node": "Evaporator 및 Machine Room",
+      "parameter": "Concentration",
+      "guideword": "High",
+      "cause": "증발기 코일 또는 연결배관 누출과 환기 실패",
+      "consequence": "기계실 암모니아 농도 상승, 독성 노출과 출입 제한",
+      "safeguards": ["암모니아 감지기 2단 경보", "비상환기", "원격 긴급차단", "방독·송기 보호구"],
+      "frequency_reference": 2,
+      "severity_reference": 4
+    }
+  ]
+}

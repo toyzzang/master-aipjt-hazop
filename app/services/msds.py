@@ -3,7 +3,7 @@ from __future__ import annotations
 import html
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 
 import httpx
 
@@ -16,6 +16,10 @@ class MsdsSummary:
     hazards: list[str]
     handling: list[str]
     source: str
+    # KOSHA가 별도의 high_risk Boolean을 주는 것은 아닙니다. 아래 값은 MSDS의
+    # H문구와 유해성 문장을 시스템 규칙으로 해석한 설명 가능한 보조 신호입니다.
+    is_high_hazard: bool = False
+    hazard_signals: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -77,6 +81,12 @@ LOCAL_MSDS = {
         material="Ammonia",
         hazards=["독성 및 부식성 가스", "누출 시 작업자 노출과 대피 위험", "가연성 혼합물 형성 가능"],
         handling=["가스감지기와 긴급차단", "국소배기", "내화학 보호구", "물분무/제독 설비 점검"],
+        source="PoC 내장 MSDS 요약",
+    ),
+    "ammonia water": MsdsSummary(
+        material="Ammonia Water",
+        hazards=["암모니아수 증기 흡입 및 피부·눈 접촉 위험", "농도에 따라 부식성과 수생환경 유해성 검토 필요", "가열·교반 시 암모니아 증기 방출 가능"],
+        handling=["밀폐 이송과 국소배기", "보안경·내화학 장갑", "누출 시 환기와 액체 확산 방지", "농도별 MSDS와 응급조치 확인"],
         source="PoC 내장 MSDS 요약",
     ),
     "chlorine": MsdsSummary(
@@ -146,7 +156,7 @@ async def fetch_msds_summary_with_trace(material: str) -> MsdsLookupResult:
 
     kosha_outcome = await _fetch_kosha_msds_summary_with_reason(material)
     if kosha_outcome.summary:
-        kosha_summary = kosha_outcome.summary
+        kosha_summary = classify_msds_hazard(kosha_outcome.summary)
         steps.append(
             MsdsLookupStep(
                 title="KOSHA MSDS 검색 결과를 찾았습니다.",
@@ -165,7 +175,7 @@ async def fetch_msds_summary_with_trace(material: str) -> MsdsLookupResult:
     # Bing 일반 웹 검색 fallback은 현재 PoC 요청에 따라 임시 제외합니다.
     # 나중에 다시 사용할 때는 `BING_SEARCH_API_KEY`/`BING_SEARCH_ENDPOINT` 기반
     # 보완 조회 코드를 이 위치에 복구하면 됩니다.
-    summary = local or _unknown_summary(material, "PoC 내장 요약 없음")
+    summary = classify_msds_hazard(local or _unknown_summary(material, "PoC 내장 요약 없음"))
     steps.append(
         MsdsLookupStep(
             title="PoC 내장 MSDS 요약을 사용합니다.",
@@ -175,18 +185,55 @@ async def fetch_msds_summary_with_trace(material: str) -> MsdsLookupResult:
     return MsdsLookupResult(summary=summary, steps=steps)
 
 
+def classify_msds_hazard(summary: MsdsSummary) -> MsdsSummary:
+    """MSDS H문구/유해성 문장에서 보수적인 고위험 신호를 찾습니다.
+
+    쉽게 말하면 KOSHA 응답에 없는 `고위험 여부`를 임의의 AI 판단으로 만들지 않고,
+    화면에서 다시 확인할 수 있는 H코드와 위험 키워드만 규칙으로 분류합니다.
+    """
+
+    joined = " ".join(summary.hazards).lower()
+    signals: list[str] = []
+    high_h_codes = sorted(
+        set(
+            re.findall(
+                r"\bH(?:2\d{2}|300|310|314|318|330|334|340|350|360|370|400|410)\b",
+                " ".join(summary.hazards),
+                flags=re.IGNORECASE,
+            )
+        )
+    )
+    if high_h_codes:
+        signals.append("고위험 H문구: " + ", ".join(code.upper() for code in high_h_codes))
+
+    keyword_groups = {
+        "급성독성/치명성": ("급성 독성", "치명", "fatal", "toxic", "독성가스"),
+        "부식/중대손상": ("부식성", "화학화상", "중대한 눈 손상"),
+        "화재/폭발": ("자연발화", "고인화성", "극인화성", "폭발성", "flammable", "explosive"),
+        "산화성": ("강한 산화성", "산화성 가스", "oxidizing"),
+    }
+    for label, keywords in keyword_groups.items():
+        if any(keyword in joined for keyword in keywords):
+            signals.append(label)
+
+    return replace(summary, is_high_hazard=bool(signals), hazard_signals=signals)
+
+
 def material_names(materials: str, node_materials: str = "") -> list[str]:
-    """사용자가 입력한 물질 문자열에서 물질명 후보를 뽑습니다."""
+    """사용자 입력을 구분자로만 나누고 검색할 물질명은 그대로 보존합니다.
+
+    alias 치환이나 대표 물질명 병합은 하지 않습니다. 완전히 같은 입력만
+    동일 KOSHA 요청을 반복하지 않도록 한 번으로 제한합니다.
+    """
 
     raw = f"{materials},{node_materials}"
     tokens = []
-    for chunk in raw.replace("/", ",").replace("\n", ",").split(","):
+    for chunk in raw.replace("\n", ",").split(","):
         value = chunk.strip()
         if not value:
             continue
         if ":" in value:
             value = value.split(":", 1)[1].strip()
-        value = _canonical_material_name(value)
         if value and value not in tokens:
             tokens.append(value)
     return tokens
@@ -294,39 +341,6 @@ def _first_kosha_result(page_html: str, material: str) -> tuple[str | None, str 
         return None, None
     chem_id, name = exact_matches[0] if exact_matches else matches[0]
     return chem_id, _clean_text(name)
-
-
-def _canonical_material_name(value: str) -> str:
-    """Node별 물질 설명에서 대표 물질명만 최대한 보수적으로 추출합니다.
-
-    예를 들어 `HF byproduct`는 KOSHA 검색어로 그대로 쓰면 엉뚱한 결과가 나올 수 있으므로
-    대표 물질인 `HF`로 정규화합니다.
-    """
-
-    lowered = value.strip().lower()
-    if re.search(r"\bhf\b", lowered):
-        return "HF"
-    if "silane" in lowered:
-        return "Silane"
-    if "hydrogen" in lowered:
-        return "Hydrogen"
-    if "nitrogen" in lowered or "n2" in lowered:
-        return "Nitrogen"
-    if "di water" in lowered or "diw" in lowered:
-        return "DI Water"
-    if "ammonia" in lowered or "암모니아" in lowered:
-        return "Ammonia"
-    if "chlorine" in lowered or "염소" in lowered:
-        return "Chlorine"
-    if "isopropyl alcohol" in lowered or lowered == "ipa" or "이소프로필 알코올" in lowered:
-        return "Isopropyl alcohol"
-    if "lithium hexafluorophosphate" in lowered or "lipf6" in lowered:
-        return "Lithium hexafluorophosphate"
-    if "ethylene carbonate" in lowered:
-        return "Ethylene carbonate"
-    if "dimethyl carbonate" in lowered:
-        return "Dimethyl carbonate"
-    return value.strip()
 
 
 def _extract_kosha_hazards(page_html: str) -> list[str]:

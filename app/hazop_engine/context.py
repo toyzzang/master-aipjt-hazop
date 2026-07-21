@@ -24,31 +24,12 @@ class HazopPlanStep(BaseModel):
     success_condition: str
 
 
-class HazopPlanCandidate(BaseModel):
-    """고정 Workflow 안에서 비교하는 제한된 근거 활용 전략입니다."""
-
-    candidate_id: str
-    name: str
-    description: str
-    reason: str
-    observed_conditions: list[str]
-    limitations: list[str]
-    evidence_priority: list[str]
-    review_focus: list[str]
-    tool_policy: dict[str, str]
-
-
 class HazopExecutionPlan(BaseModel):
     """Agent들이 실제로 공유하는 구조화 실행계획입니다."""
 
     plan_id: str
     steps: list[HazopPlanStep]
     success_conditions: list[str]
-    candidates: list[HazopPlanCandidate]
-    selected_candidate_id: str
-
-    def selected_candidate(self) -> HazopPlanCandidate:
-        return next(item for item in self.candidates if item.candidate_id == self.selected_candidate_id)
 
 
 class EngineEvent(BaseModel):
@@ -60,6 +41,10 @@ class EngineEvent(BaseModel):
     agent_id: str | None = None
     phase: str | None = None
     loading: bool = False
+    emphasis: bool = False
+    parent_kind: str | None = None
+    parent_event_key: str | None = None
+    event_key: str | None = None
 
 
 class AgentTrace(BaseModel):
@@ -69,17 +54,25 @@ class AgentTrace(BaseModel):
     kind: str
     success: bool
     detail: str = ""
+    trace_id: str = ""
+    status: str = "completed"
+    input_detail: str = ""
+    result_detail: str = ""
 
 
 class IncidentHistoryContext(BaseModel):
     """사고이력 분석 결과입니다.
 
-    초기 PoC에는 실제 사고이력 저장소가 없으므로, 데이터 부재도 명시적인 근거로 남깁니다.
+    PoC 로컬 JSON 저장소의 유사 사고·Near Miss·정비 이력 조회 결과입니다.
     """
 
     matched_count: int = 0
     evidence: list[str] = Field(default_factory=list)
     frequency_hint: int | None = None
+    matched_records: list[dict] = Field(default_factory=list)
+    dataset_title: str = ""
+    data_notice: str = ""
+    source: str = ""
 
 
 class StandardHazopContext(BaseModel):
@@ -88,6 +81,9 @@ class StandardHazopContext(BaseModel):
     reference_id: str = ""
     matched_count: int = 0
     evidence: list[str] = Field(default_factory=list)
+    document_title: str = ""
+    revision: str = ""
+    source: str = ""
 
 
 class HazopDraftContext(BaseModel):
