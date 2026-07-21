@@ -32,6 +32,8 @@ def lookup_msds_detail(
         "handling_storage": summary.handling,
         "leak_fire_emergency": summary.handling,
         "source": summary.source,
+        "is_high_hazard": summary.is_high_hazard,
+        "hazard_signals": summary.hazard_signals,
         "lookup_succeeded": lookup_succeeded,
         "fallback_used": fallback_used,
         "section_limitations": (

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import random
 from pathlib import Path
@@ -10,7 +11,9 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
-from app.hazop_engine.context import HazopDraftContext
+from app.hazop_engine.context import HazopDraftContext, IncidentHistoryContext, StandardHazopContext
+from app.hazop_engine.tools.incident_history_tools import lookup_incident_history
+from app.hazop_engine.tools.standard_hazop_tools import lookup_standard_hazop
 from app.hazop_engine.workflow import generate_hazop_draft
 from app.schemas.hazop import (
     ActionPlanRow,
@@ -24,6 +27,11 @@ from app.services.excel import export_result_excel, validate_and_parse_excel_wit
 from app.services.llm import azure_openai_configured, connected_model_label, generate_json_with_azure, missing_azure_openai_env
 from app.services.msds import MsdsSummary, fetch_msds_summary_with_trace, material_names
 from app.services.risk import action_required, calculate_risk_score, clamp_frequency, clamp_severity, risk_level
+
+
+# Uvicorn이 기본으로 콘솔에 연결한 logger를 사용해야 Docker/로컬 실행에서
+# 별도 logging 설정 없이도 같은 구조화 이벤트가 터미널에 보입니다.
+logger = logging.getLogger("uvicorn.error")
 
 
 class AgentRunEvent:
@@ -88,41 +96,110 @@ async def run_hazop_agent(
     if not materials:
         materials = ["확인 필요"]
 
+    msds_agent_id = "msds-lookup-workflow"
     yield _log(
-        "Workflow 필수 MSDS 조회를 시작합니다.",
-        f"입력된 모든 물질({', '.join(materials)})을 누락 없이 최초 1회씩 조회합니다. 이 단계는 AI 판단이 아닌 고정 절차입니다.",
+        "Workflow 필수 MSDS 조회 · 고유 물질 전체 확인",
+        f"입력된 고유 물질 {len(materials)}개({', '.join(materials)})를 누락 없이 조회합니다. 같은 물질의 Node 중복은 한 번만 조회합니다.",
         kind="system",
+        loading=True,
+        agent_id=msds_agent_id,
+        phase="start",
     )
     await _log_delay()
 
     msds_context: dict[str, MsdsSummary] = {}
     for material in materials:
         yield _log(
-            "입력 물질 MSDS를 최초 조회합니다.",
-            f"{material}의 유해성, 취급 기준, 누출 대응 정보를 Workflow가 1회 조회합니다.",
-            kind="workflow",
+            f"{material} · KOSHA MSDS 조회 중",
+            "물질명 검색 → 상세 유해성 확인 → 취급·누출 대응 요약 순서로 조회합니다.",
+            kind="tool",
+            loading=True,
+            agent_id=msds_agent_id,
+            phase="progress",
+            event_key=f"msds:{material.lower()}",
         )
-        await _log_delay()
-        lookup = await fetch_msds_summary_with_trace(material)
-        for step in lookup.steps:
-            yield _log(step.title, step.detail, kind="workflow")
-            await _log_delay()
+
+    async def fetch_material(material: str):
+        return material, await fetch_msds_summary_with_trace(material)
+
+    lookup_tasks = [asyncio.create_task(fetch_material(material)) for material in materials]
+    for completed_task in asyncio.as_completed(lookup_tasks):
+        material, lookup = await completed_task
         summary = lookup.summary
         msds_context[material.lower()] = summary
+        step_detail = "\n".join(f"· {step.title} {step.detail}" for step in lookup.steps)
         yield _log(
-            "MSDS 정보를 요약했습니다.",
-            f"{summary.material}: {'; '.join(summary.hazards[:2])} / 출처: {summary.source} / 최초 조회 완료",
+            f"{material} · MSDS 조회 완료",
+            f"{step_detail}\n· 판단 Context: {'; '.join(summary.hazards[:2])}\n· 출처: {summary.source}",
             kind="result",
+            agent_id=msds_agent_id,
+            phase="progress",
+            event_key=f"msds:{material.lower()}",
         )
         await _log_delay()
 
-    if input_data.standard_hazop_link:
+    yield _log(
+        "고유 물질 MSDS 조회를 모두 완료했습니다.",
+        f"{len(msds_context)}/{len(materials)}개 물질의 MSDS 요약을 Agent 공통 Context에 저장했습니다.",
+        kind="result",
+        agent_id=msds_agent_id,
+        phase="finish",
+    )
+
+    # 사고·정비 이력도 Agent가 필요할 때마다 처음부터 찾게 두지 않고,
+    # 입력된 공정·설비·물질·Guideword 전체를 사용해 한 번 선조회합니다.
+    incident_query = " ".join(
+        [
+            input_data.maker,
+            input_data.model,
+            *materials,
+            *(node.node_name for node in nodes),
+            *(f"{item.parameter} {item.guideword}" for item in guidewords),
+            input_data.incident_maintenance_history,
+        ]
+    )
+    incident_result = lookup_incident_history(incident_query)
+    incident_history_context = IncidentHistoryContext.model_validate(incident_result)
+    if not azure_openai_configured():
         yield _log(
-            "표준공정위험성평가서 참고 여부를 판단했습니다.",
-            f"사용자가 제공한 Link/ID({input_data.standard_hazop_link})를 유사사례 근거로 사용합니다.",
-            kind="workflow",
+            "로컬 사고·정비 이력 저장소를 조회했습니다.",
+            (
+                f"{incident_history_context.dataset_title or 'PoC 사고·정비 이력'}에서 유사 이력 "
+                f"{incident_history_context.matched_count}건을 찾아 Agent 공통 Context에 저장했습니다. "
+                f"빈도 참고값: {incident_history_context.frequency_hint or '확인 필요'}\n"
+                f"자료 구분: {incident_history_context.data_notice or 'PoC 합성 샘플'}\n"
+                + "\n".join(incident_history_context.evidence[:3])
+            ),
+            kind="result" if incident_history_context.matched_count else "warning",
         )
         await _log_delay()
+
+    standard_hazop_context = StandardHazopContext()
+
+    if input_data.standard_hazop_link:
+        standard_query = " ".join(
+            [
+                input_data.maker,
+                input_data.model,
+                *materials,
+                *(node.node_name for node in nodes),
+                *(f"{item.parameter} {item.guideword}" for item in guidewords),
+            ]
+        )
+        standard_result = lookup_standard_hazop(input_data.standard_hazop_link, standard_query)
+        standard_hazop_context = StandardHazopContext.model_validate(standard_result)
+        if not azure_openai_configured():
+            yield _log(
+                "로컬 표준 HAZOP 문서를 조회했습니다.",
+                (
+                    f"{standard_hazop_context.document_title or input_data.standard_hazop_link} "
+                    f"개정 {standard_hazop_context.revision or '확인 필요'}에서 유사 Row "
+                    f"{standard_hazop_context.matched_count}건을 찾아 Agent 공통 Context에 저장했습니다.\n"
+                    + "\n".join(standard_hazop_context.evidence[:3])
+                ),
+                kind="result" if standard_hazop_context.matched_count else "warning",
+            )
+            await _log_delay()
     else:
         yield _log(
             "표준공정위험성평가서 참고자료가 없습니다.",
@@ -132,12 +209,14 @@ async def run_hazop_agent(
         await _log_delay()
 
     if azure_openai_configured():
+        yield AgentRunEvent("run_mode", {"mode": "deepagent", "label": f"DeepAgent · {connected_model_label()}"})
         yield _log(
             "Deepagent HAZOP Engine을 시작합니다.",
             f"연결된 {connected_model_label()} 모델로 #3 작성, 초안 검토 및 보완, 검토 반영, #4 조치계획 생성을 순서대로 수행합니다.",
             kind="agent",
         )
     else:
+        yield AgentRunEvent("run_mode", {"mode": "demo", "label": "규칙 기반 Demo"})
         missing_keys = ", ".join(missing_azure_openai_env())
         yield _log(
             "Deepagent HAZOP Engine을 Demo 모드로 시작합니다.",
@@ -152,11 +231,32 @@ async def run_hazop_agent(
         guidewords=guidewords,
         risk_criteria=risk_criteria,
         msds_context=msds_context,
+        incident_history_context=incident_history_context,
+        standard_hazop_context=standard_hazop_context,
     )
     draft_result = None
     progress_events: asyncio.Queue = asyncio.Queue()
 
     async def on_draft_progress(engine_event) -> None:
+        logger.info(
+            "AGENT_TRACE %s",
+            json.dumps(
+                {
+                    "request_id": request_id,
+                    "agent_id": engine_event.agent_id,
+                    "kind": engine_event.kind,
+                    "phase": engine_event.phase,
+                    "title": engine_event.title,
+                    "detail": engine_event.detail,
+                    "loading": engine_event.loading,
+                    "emphasis": engine_event.emphasis,
+                    "parent_kind": engine_event.parent_kind,
+                    "parent_event_key": engine_event.parent_event_key,
+                    "event_key": engine_event.event_key,
+                },
+                ensure_ascii=False,
+            ),
+        )
         await progress_events.put(engine_event)
 
     draft_task = asyncio.create_task(generate_hazop_draft(draft_context, progress=on_draft_progress))
@@ -171,6 +271,10 @@ async def run_hazop_agent(
                 loading=engine_event.loading,
                 agent_id=engine_event.agent_id,
                 phase=engine_event.phase,
+                emphasis=engine_event.emphasis,
+                parent_kind=engine_event.parent_kind,
+                parent_event_key=engine_event.parent_event_key,
+                event_key=engine_event.event_key,
             )
             await _progress_log_delay(engine_event)
         except TimeoutError:
@@ -223,6 +327,7 @@ async def run_hazop_agent(
         review_findings=draft_result.review_findings,
         execution_plan=draft_result.execution_plan.model_dump() if draft_result.execution_plan else None,
         output_excel=str(output_excel),
+        mode=draft_result.mode,
     )
     result_path = workdir / "result.json"
     result_path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
@@ -674,6 +779,10 @@ def _log(
     loading: bool = False,
     agent_id: str | None = None,
     phase: str | None = None,
+    emphasis: bool = False,
+    parent_kind: str | None = None,
+    parent_event_key: str | None = None,
+    event_key: str | None = None,
 ) -> AgentRunEvent:
     return AgentRunEvent(
         "log",
@@ -684,6 +793,10 @@ def _log(
             "loading": loading,
             "agent_id": agent_id,
             "phase": phase,
+            "emphasis": emphasis,
+            "parent_kind": parent_kind,
+            "parent_event_key": parent_event_key,
+            "event_key": event_key,
         },
     )
 
@@ -711,9 +824,6 @@ async def _progress_log_delay(engine_event) -> None:
     agent_progress = bool(engine_event.agent_id) and engine_event.phase in {"start", "progress"}
     high_level_reasoning = engine_event.kind in {
         "planning",
-        "plan-candidate",
-        "plan-evaluation",
-        "plan-selected",
         "self-correction",
         "replanning",
     }

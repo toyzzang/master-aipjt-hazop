@@ -116,3 +116,4 @@ class HazopResult(BaseModel):
     review_findings: list[ReviewFinding] = Field(default_factory=list)
     execution_plan: dict | None = None
     output_excel: str | None = None
+    mode: str = "demo"

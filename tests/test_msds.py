@@ -4,6 +4,15 @@ from app.services import msds
 from app.services.msds import KoshaLookupOutcome, MsdsLookupResult, MsdsSummary
 
 
+def test_msds_material_names_preserve_user_keyin_without_alias_normalization():
+    assert msds.material_names("Ammonia, Ammonia Water, Aqueous Ammonia") == [
+        "Ammonia",
+        "Ammonia Water",
+        "Aqueous Ammonia",
+    ]
+    assert msds.LOCAL_MSDS["ammonia water"].material == "Ammonia Water"
+
+
 def test_kosha_parser_selects_exact_material_and_extracts_detail():
     search_html = """
         <a href="javascript:getDetail('msds','999999');">Hydrogen peroxide</a>
@@ -18,6 +27,21 @@ def test_kosha_parser_selects_exact_material_and_extracts_detail():
     assert msds._first_kosha_result(search_html, "Hydrogen") == ("000557", "HYDROGEN")
     assert "H220 : 극인화성 가스" in msds._extract_kosha_hazards(detail_html)
     assert any(value.startswith("P210") for value in msds._extract_kosha_handling(detail_html))
+
+
+def test_msds_hazard_classification_keeps_explainable_signals():
+    classified = msds.classify_msds_hazard(
+        MsdsSummary(
+            material="HYDROGEN",
+            hazards=["H220 : 극인화성 가스"],
+            handling=["P210 : 점화원으로부터 멀리하시오"],
+            source="KOSHA MSDS 검색 chem_id=000557",
+        )
+    )
+
+    assert classified.is_high_hazard
+    assert "고위험 H문구: H220" in classified.hazard_signals
+    assert "화재/폭발" in classified.hazard_signals
 
 
 def test_kosha_parser_rejects_short_material_false_positive():
@@ -52,6 +76,8 @@ def test_lookup_trace_reports_kosha_success(monkeypatch):
     result = asyncio.run(msds.fetch_msds_summary_with_trace("Hydrogen"))
 
     assert result.summary.source.startswith("KOSHA MSDS 검색")
+    assert result.summary.is_high_hazard
+    assert "고위험 H문구: H220" in result.summary.hazard_signals
     assert "검색 결과를 찾았습니다" in result.steps[-1].title
 
 
@@ -65,6 +91,8 @@ def test_agent_msds_tool_returns_explicit_lookup_contract(monkeypatch):
                 hazards=["공기 중 자연발화 가능"],
                 handling=["누출 시 긴급차단 및 대피"],
                 source="PoC 내장 MSDS 요약",
+                is_high_hazard=True,
+                hazard_signals=["화재/폭발"],
             ),
             steps=[],
         )
@@ -82,3 +110,5 @@ def test_agent_msds_tool_returns_explicit_lookup_contract(monkeypatch):
     assert result["lookup_succeeded"]
     assert result["fallback_used"]
     assert result["source"] == "PoC 내장 MSDS 요약"
+    assert result["is_high_hazard"]
+    assert result["hazard_signals"] == ["화재/폭발"]

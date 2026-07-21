@@ -1,0 +1,29 @@
+{
+  "reference_id": "STD-HAZOP-SILANE-GAS-2026-001",
+  "title": "Silane 가스 공급설비 표준 HAZOP",
+  "process": "Silane Gas Supply",
+  "materials": ["Silane", "Hydrogen", "Nitrogen"],
+  "revision": "2026-01",
+  "rows": [
+    {
+      "node": "Gas Cabinet",
+      "parameter": "Containment",
+      "guideword": "Leak",
+      "cause": "실린더 연결부 체결 불량 또는 밸브·배관 손상",
+      "consequence": "Silane 자연발화, 화재·폭발 및 작업자 열 영향",
+      "safeguards": ["Gas Detector", "자동 긴급차단", "Cabinet 배기", "소화·비상대응"],
+      "frequency_reference": 2,
+      "severity_reference": 4
+    },
+    {
+      "node": "VMB 및 공급 배관",
+      "parameter": "Flow",
+      "guideword": "More",
+      "cause": "MFC 또는 압력조절기 Fail Open",
+      "consequence": "과다 공급과 반응기 이상, 배기계통 부하 증가",
+      "safeguards": ["Excess Flow Shutoff", "MFC 상한 알람", "공정 Interlock"],
+      "frequency_reference": 2,
+      "severity_reference": 4
+    }
+  ]
+}

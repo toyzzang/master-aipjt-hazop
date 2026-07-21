@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
 import time
 from typing import Any, Awaitable, Callable
 
@@ -13,7 +15,6 @@ from app.hazop_engine.events import engine_event
 from app.hazop_engine.planning import build_execution_plan, plan_prompt
 from app.hazop_engine.tools.incident_history_tools import lookup_incident_history
 from app.hazop_engine.tools.msds_tools import lookup_msds_detail
-from app.hazop_engine.tools.standard_hazop_tools import lookup_standard_hazop
 from app.hazop_engine.tools.validation_tools import (
     parse_action_rows,
     parse_risk_rows,
@@ -66,8 +67,7 @@ async def generate_hazop_draft(context: HazopDraftContext, progress: ProgressCal
 
     events = []
 
-    # 전체 5단계 순서는 안전 규칙으로 고정하되, 입력에 맞는 근거 우선순위와
-    # 검토 중점은 실제 Plan 객체로 만들어 이후 모든 Agent에게 전달합니다.
+    # 전체 5단계 순서는 안전 규칙으로 고정하고 모든 Agent가 같은 Plan을 공유합니다.
     execution_plan = context.execution_plan or build_execution_plan(context)
     context.execution_plan = execution_plan
 
@@ -109,6 +109,7 @@ async def generate_hazop_draft(context: HazopDraftContext, progress: ProgressCal
                     agent_id="risk-draft-agent",
                     phase="progress",
                     loading=True,
+                    event_key="risk-draft-agent:planning",
                 ),
             ],
         )
@@ -158,6 +159,7 @@ async def generate_hazop_draft(context: HazopDraftContext, progress: ProgressCal
                     agent_id="risk-review-agent",
                     phase="progress",
                     loading=True,
+                    event_key="risk-review-agent:planning",
                 ),
             ],
         )
@@ -165,8 +167,8 @@ async def generate_hazop_draft(context: HazopDraftContext, progress: ProgressCal
             context, system_checked_rows, events, progress
         )
         await _record_trace_events(events, review_traces, progress, agent_id="risk-review-agent")
-        review_findings = _normalize_review_findings(review_findings, system_checked_rows, reviewed_rows)
-        await _record_review_findings(events, review_findings, progress, agent_id="risk-review-agent")
+        reviewed_rows = _apply_reviewed_rows_for_findings(system_checked_rows, reviewed_rows, review_findings)
+        review_findings = _normalize_review_findings(review_findings)
         reviewed_rows = _apply_confirmation_findings(reviewed_rows, review_findings)
         calculated_rows = validate_and_calculate_risk_rows(reviewed_rows, context.guidewords, context.risk_criteria)
         await _record_self_correction_events(
@@ -218,6 +220,7 @@ async def generate_hazop_draft(context: HazopDraftContext, progress: ProgressCal
                         agent_id="action-plan-agent",
                         phase="progress",
                         loading=True,
+                        event_key="action-plan-agent:planning",
                     ),
                 ],
             )
@@ -284,10 +287,46 @@ async def generate_hazop_draft(context: HazopDraftContext, progress: ProgressCal
         return await _demo_result(context, events, fallback_reason, progress)
 
 
+def _tool_call_detail(context: HazopDraftContext, agent_id: str, trace: AgentTrace) -> str:
+    purposes = {
+        "lookup_msds_detail": "MSDS 요약만으로 물질 위험성과 영향 강도를 판단하기 어려울 때 호출",
+        "lookup_incident_history": "사용자 이력만으로 빈도 근거가 부족할 때 호출",
+    }
+    purpose = purposes.get(trace.name, "Agent 판단에 필요한 보완 근거 조회")
+    return (
+        f"호출 목적: {purpose}\n"
+        f"입력: {trace.input_detail or '인수 없음'}\n"
+        f"요청 Agent: {agent_id}"
+    )
+
+
+def _tool_result_detail(agent_id: str, trace: AgentTrace) -> str:
+    destinations = {
+        "lookup_msds_detail": "물질 위험성·강도·예방/완화 조치 판단 Context",
+        "lookup_incident_history": "발생 빈도와 반복 고장 판단 Context",
+    }
+    destination = destinations.get(trace.name, f"{agent_id} 보완 판단 Context")
+    return (
+        f"실행 결과: {trace.result_detail or trace.detail or '상세 결과 없음'}\n"
+        f"판단 반영 위치: {destination}\n"
+        "표시 원칙: Tool 결과를 다음 판단 입력으로 전달했으며, 최종 채택 여부는 결과 근거에서 다시 확인합니다."
+    )
+
+
+def _tool_display_name(tool_name: str) -> str:
+    """Tool 함수명을 시연 화면에서 바로 이해할 수 있는 업무 이름으로 바꿉니다."""
+
+    return {
+        "lookup_msds_detail": "MSDS 상세 위험성 조회",
+        "lookup_incident_history": "사고·정비 이력 조회",
+    }.get(tool_name, tool_name)
+
+
 async def _invoke_agent_with_live_stage(
     agent: Any,
     payload: dict[str, Any],
     *,
+    context: HazopDraftContext,
     events: list,
     progress: ProgressCallback | None,
     agent_id: str,
@@ -309,21 +348,31 @@ async def _invoke_agent_with_live_stage(
     """
 
     planning_opened = False
+    last_planning_detail = ""
     skills_confirmed = False
+    tool_states: dict[str, str] = {}
+    last_tool_progress: tuple[int, int] | None = None
+    parallel_tools_observed = False
+    activity_event_key = f"{agent_id}:activity"
 
     async def open_stage(snapshot: Any) -> None:
-        nonlocal planning_opened, skills_confirmed
+        nonlocal planning_opened, last_planning_detail, skills_confirmed, last_tool_progress, parallel_tools_observed
         traces = _extract_agent_traces(snapshot)
         planning_traces = [trace for trace in traces if trace.kind == "planning" and trace.success]
         if planning_traces and not planning_opened:
             planning_opened = True
+            last_planning_detail = planning_traces[-1].detail
+            completed_todos, total_todos = _planning_completion(last_planning_detail)
             await _record_events(events, progress, [
                 engine_event(
-                    "Planning: DeepAgent가 실행계획을 수립했습니다.",
-                    planning_traces[0].detail,
+                    f"Planning 실행 현황 · {completed_todos}/{total_todos} 완료",
+                    last_planning_detail,
                     kind="planning",
                     agent_id=agent_id,
                     phase="progress",
+                    loading=completed_todos < total_todos,
+                    emphasis=True,
+                    event_key=f"{agent_id}:planning",
                 ),
                 engine_event(
                     "실행할 Skill을 등록했습니다.",
@@ -347,11 +396,28 @@ async def _invoke_agent_with_live_stage(
                     phase="progress",
                 ),
             ])
+        elif planning_traces and planning_traces[-1].detail != last_planning_detail:
+            last_planning_detail = planning_traces[-1].detail
+            completed_todos, total_todos = _planning_completion(last_planning_detail)
+            await _record_event(
+                events,
+                engine_event(
+                    f"Planning 실행 현황 · {completed_todos}/{total_todos} 완료",
+                    last_planning_detail,
+                    kind="planning",
+                    agent_id=agent_id,
+                    phase="progress",
+                    loading=completed_todos < total_todos,
+                    emphasis=True,
+                    event_key=f"{agent_id}:planning",
+                ),
+                progress,
+            )
 
         succeeded_skills = {trace.name for trace in traces if trace.kind == "skill" and trace.success}
         if planning_opened and required_skills <= succeeded_skills and not skills_confirmed:
             skills_confirmed = True
-            await _record_events(events, progress, [
+            stage_events = [
                 engine_event(
                     "필수 Skill 적용을 확인했습니다.",
                     f"Agent 실행 기록에서 {len(required_skills)}개 Skill 본문을 읽고 적용한 것을 확인했습니다: "
@@ -367,8 +433,140 @@ async def _invoke_agent_with_live_stage(
                     agent_id=agent_id,
                     phase="progress",
                     loading=True,
+                    emphasis=activity_kind == "self-correction",
+                    event_key=activity_event_key,
                 ),
-            ])
+            ]
+            if agent_id == "risk-draft-agent":
+                if context.incident_history_context.evidence:
+                    stage_events.append(
+                        engine_event(
+                            "로컬 사고·정비 이력 저장소를 조회했습니다.",
+                            (
+                                f"{context.incident_history_context.dataset_title or 'PoC 사고·정비 이력'}에서 유사 이력 "
+                                f"{context.incident_history_context.matched_count}건을 찾아 Agent 공통 Context에 저장했습니다. "
+                                f"빈도 참고값: {context.incident_history_context.frequency_hint or '확인 필요'}\n"
+                                f"자료 구분: {context.incident_history_context.data_notice or 'PoC 합성 샘플'}\n"
+                                + "\n".join(context.incident_history_context.evidence[:3])
+                            ),
+                            kind="result" if context.incident_history_context.matched_count else "warning",
+                            agent_id=agent_id,
+                            phase="progress",
+                            parent_kind=activity_kind,
+                            parent_event_key=activity_event_key,
+                            event_key="workflow:incident-history",
+                        )
+                    )
+                if context.input_data.standard_hazop_link:
+                    stage_events.append(
+                        engine_event(
+                            "로컬 표준 HAZOP 문서를 조회했습니다.",
+                            (
+                                f"{context.standard_hazop_context.document_title or context.input_data.standard_hazop_link} "
+                                f"개정 {context.standard_hazop_context.revision or '확인 필요'}에서 유사 Row "
+                                f"{context.standard_hazop_context.matched_count}건을 찾아 Agent 공통 Context에 저장했습니다.\n"
+                                + "\n".join(context.standard_hazop_context.evidence[:3])
+                            ),
+                            kind="result" if context.standard_hazop_context.matched_count else "warning",
+                            agent_id=agent_id,
+                            phase="progress",
+                            parent_kind=activity_kind,
+                            parent_event_key=activity_event_key,
+                            event_key="workflow:standard-hazop",
+                        )
+                    )
+            await _record_events(events, progress, stage_events)
+
+        # DeepAgent가 실제로 만든 Tool call id를 기준으로 시작과 완료를 한 번씩만
+        # 보냅니다. 모델의 내부 사고를 추측하지 않고 SDK 메시지에서 확인한 사실만 표시합니다.
+        tool_traces = [item for item in traces if item.kind == "tool"]
+        latest_tool_traces: dict[str, AgentTrace] = {}
+        for trace in tool_traces:
+            trace_key = trace.trace_id or f"{trace.name}:{trace.input_detail}"
+            latest_tool_traces[trace_key] = trace
+
+        if sum(trace.status == "running" for trace in latest_tool_traces.values()) > 1:
+            parallel_tools_observed = True
+
+        if latest_tool_traces:
+            projected_states = {**tool_states}
+            projected_states.update({key: trace.status for key, trace in latest_tool_traces.items()})
+            total_count = len(projected_states)
+            completed_count = sum(status != "running" for status in projected_states.values())
+            progress_state = (completed_count, total_count)
+            if progress_state != last_tool_progress:
+                last_tool_progress = progress_state
+                parallel_label = "병렬 근거 조회" if parallel_tools_observed else "근거 조회"
+                if activity_kind == "self-correction":
+                    progress_title = activity_title
+                    waiting_text = (
+                        "Tool 결과를 근거 Context에 합쳤습니다. 이제 원인→결과 연결, MSDS 모순, "
+                        "빈도·강도 근거와 수정 필요 Row를 검토하고 있습니다."
+                        if completed_count == total_count
+                        else "모든 조회 결과를 취합한 뒤 원인→결과 연결과 근거 모순 검토를 계속합니다."
+                    )
+                else:
+                    progress_title = (
+                        "Tool 결과를 취합해 Agent 결과를 생성 중입니다."
+                        if completed_count == total_count
+                        else activity_title
+                    )
+                    waiting_text = (
+                        "조회 결과를 모델 Context에 전달했습니다. 구조화 결과를 생성하고 검증하는 중입니다."
+                        if completed_count == total_count
+                        else "모든 조회 결과가 도착하면 모델 Context에 합쳐 다음 작업을 계속합니다."
+                    )
+                await _record_event(
+                    events,
+                    engine_event(
+                        progress_title,
+                        f"{parallel_label} · {completed_count}/{total_count} 완료\n{waiting_text}",
+                        kind=activity_kind,
+                        agent_id=agent_id,
+                        phase="progress",
+                        loading=True,
+                        emphasis=activity_kind == "self-correction",
+                        event_key=activity_event_key,
+                    ),
+                    progress,
+                )
+
+        for trace_key, trace in latest_tool_traces.items():
+            previous_status = tool_states.get(trace_key)
+            if previous_status is None:
+                await _record_event(
+                    events,
+                    engine_event(
+                        _tool_display_name(trace.name),
+                        _tool_call_detail(context, agent_id, trace),
+                        kind="tool",
+                        agent_id=agent_id,
+                        phase="progress",
+                        loading=trace.status == "running",
+                        emphasis=True,
+                        parent_kind=activity_kind,
+                        parent_event_key=activity_event_key,
+                        event_key=trace_key,
+                    ),
+                    progress,
+                )
+            if trace.status != "running" and previous_status != trace.status:
+                await _record_event(
+                    events,
+                    engine_event(
+                        _tool_display_name(trace.name),
+                        _tool_result_detail(agent_id, trace),
+                        kind="tool" if trace.success else "warning",
+                        agent_id=agent_id,
+                        phase="progress",
+                        emphasis=True,
+                        parent_kind=activity_kind,
+                        parent_event_key=activity_event_key,
+                        event_key=trace_key,
+                    ),
+                    progress,
+                )
+            tool_states[trace_key] = trace.status
 
     stream = getattr(agent, "stream", None)
     if not callable(stream):
@@ -417,7 +615,7 @@ async def _generate_risk_rows_with_deepagent(
     agent_id = "risk-draft-agent"
     try:
         agent = create_hazop_deep_agent(
-            tools=[lookup_msds_detail, lookup_incident_history, lookup_standard_hazop],
+            tools=[lookup_msds_detail, lookup_incident_history],
             system_prompt=_risk_system_prompt(),
             response_format=DeepAgentRiskOutput,
             agent_name=agent_id,
@@ -425,6 +623,7 @@ async def _generate_risk_rows_with_deepagent(
         result = await _invoke_agent_with_live_stage(
             agent,
             {"messages": [{"role": "user", "content": _risk_user_prompt(context)}]},
+            context=context,
             events=events if events is not None else [],
             progress=progress,
             agent_id=agent_id,
@@ -437,14 +636,14 @@ async def _generate_risk_rows_with_deepagent(
             tool_detail=(
                 "lookup_msds_detail: 상세 유해성·누출 대응 보완 조회\n"
                 "lookup_incident_history: 유사 사고이력 보완 조회\n"
-                "lookup_standard_hazop: 표준 HAZOP 사례 보완 조회"
+                "표준 HAZOP: Workflow가 한 번 선조회한 공통 Context를 재사용"
             ),
             context_title="위험성평가 작성 Context Prompt를 구성했습니다.",
             context_detail=(
                 f"{_draft_context_summary(context)}\n"
                 "Excel의 Node·변수·Guideword, MSDS, 사고·정비 이력, 위험도 기준표를 하나의 LLM 입력 Context로 결합했습니다."
             ),
-            activity_title="Agent가 모델과 Tool을 사용해 작업 중입니다.",
+            activity_title="Tool 결과를 취합해 Agent 결과를 생성 중입니다.",
             activity_detail=(
                 f"{_draft_context_summary(context)}\n"
                 "Skill과 Context를 Azure OpenAI 모델에 전달해 #3 위험성평가 초안을 작성하고 있습니다."
@@ -471,7 +670,7 @@ async def _review_risk_rows_with_deepagent(
     agent_id = "risk-review-agent"
     try:
         agent = create_hazop_deep_agent(
-            tools=[lookup_msds_detail, lookup_incident_history, lookup_standard_hazop],
+            tools=[lookup_msds_detail, lookup_incident_history],
             system_prompt=_review_system_prompt(),
             response_format=DeepAgentReviewOutput,
             agent_name=agent_id,
@@ -479,6 +678,7 @@ async def _review_risk_rows_with_deepagent(
         result = await _invoke_agent_with_live_stage(
             agent,
             {"messages": [{"role": "user", "content": _review_user_prompt(context, system_checked_rows)}]},
+            context=context,
             events=events if events is not None else [],
             progress=progress,
             agent_id=agent_id,
@@ -491,17 +691,22 @@ async def _review_risk_rows_with_deepagent(
             tool_detail=(
                 "lookup_msds_detail: MSDS 모순 보완 조회\n"
                 "lookup_incident_history: 빈도 근거 보완 조회\n"
-                "lookup_standard_hazop: 표준 사례 보완 조회"
+                "표준 HAZOP: Workflow가 한 번 선조회한 공통 Context를 재사용"
             ),
             context_title="위험도 검토 Context Prompt를 구성했습니다.",
             context_detail=(
                 f"{_review_context_summary(context, system_checked_rows)}\n"
                 "Excel 원본, 초안, MSDS, 사고·정비 이력, 위험도 기준표를 독립 검토용 LLM Context로 결합했습니다."
             ),
-            activity_title="Self-Correction: 전체 위험성평가 Row를 비교 검토하고 있습니다.",
+            activity_title=f"Self-Correction · 전체 {len(system_checked_rows)}건 비교 검토 중",
             activity_detail=(
                 f"{_review_context_summary(context, system_checked_rows)}\n"
-                f"초안 {len(system_checked_rows)}건의 연결 관계, 판단 근거와 MSDS 모순을 독립 검토합니다."
+                f"초안 {len(system_checked_rows)}건을 다음 공개 검토 기준으로 독립 검토합니다.\n"
+                "1. Excel Node·변수·Guideword와 평가 Row 연결 보존\n"
+                "2. 원인 → 결과 문장의 논리 연결과 안전조치 역할\n"
+                "3. MSDS 유해성과 강도 판단의 모순·과소평가\n"
+                "4. 사고이력·표준 HAZOP 대비 빈도와 누락 근거\n"
+                "5. 수정본 전체 Row 반환 후 시스템 재계산 준비"
             ),
             activity_kind="self-correction",
         )
@@ -533,7 +738,7 @@ async def _generate_action_rows_with_deepagent(
     agent_id = "action-plan-agent"
     try:
         agent = create_hazop_deep_agent(
-            tools=[lookup_msds_detail, lookup_incident_history, lookup_standard_hazop],
+            tools=[lookup_msds_detail, lookup_incident_history],
             system_prompt=_action_system_prompt(),
             response_format=DeepAgentActionOutput,
             agent_name=agent_id,
@@ -541,6 +746,7 @@ async def _generate_action_rows_with_deepagent(
         result = await _invoke_agent_with_live_stage(
             agent,
             {"messages": [{"role": "user", "content": _action_user_prompt(context, high_risk_rows)}]},
+            context=context,
             events=events if events is not None else [],
             progress=progress,
             agent_id=agent_id,
@@ -552,7 +758,7 @@ async def _generate_action_rows_with_deepagent(
             tool_detail=(
                 "lookup_msds_detail: 물질별 예방·완화 조치 보완 조회\n"
                 "lookup_incident_history: 사고 재발 방지 조치 보완 조회\n"
-                "lookup_standard_hazop: 표준 조치 사례 보완 조회"
+                "표준 HAZOP: Workflow가 한 번 선조회한 공통 Context를 재사용"
             ),
             context_title="조치계획 작성 Context Prompt를 구성했습니다.",
             context_detail=(
@@ -629,6 +835,7 @@ def _extract_agent_traces(result: Any) -> list[AgentTrace]:
             args = _object_value(call, "args") or {}
             tool_result = tool_results.get(call_id)
             success = _tool_result_succeeded(tool_result)
+            status = "running" if tool_result is None else ("completed" if success else "failed")
             if name == "read_file":
                 path = str(_object_value(args, "file_path") or _object_value(args, "path") or "")
                 if path.endswith("/SKILL.md") and "/skills/" in path:
@@ -639,15 +846,21 @@ def _extract_agent_traces(result: Any) -> list[AgentTrace]:
                             kind="skill",
                             success=success,
                             detail=f"{path} read_file {'성공' if success else '실패'}",
+                            trace_id=call_id,
+                            status=status,
                         )
                     )
-            elif name in {"lookup_msds_detail", "lookup_incident_history", "lookup_standard_hazop"}:
+            elif name in {"lookup_msds_detail", "lookup_incident_history"}:
                 traces.append(
                     AgentTrace(
                         name=name,
                         kind="tool",
                         success=success,
                         detail=f"호출 조건={args}",
+                        trace_id=call_id,
+                        status=status,
+                        input_detail=json.dumps(args, ensure_ascii=False, default=str),
+                        result_detail=_tool_result_summary(tool_result),
                     )
                 )
             elif name == "write_todos":
@@ -655,6 +868,7 @@ def _extract_agent_traces(result: Any) -> list[AgentTrace]:
                 todo_lines = []
                 for index, todo in enumerate(todos, start=1):
                     content = str(_object_value(todo, "content") or _object_value(todo, "task") or "실행 항목")
+                    content = _localize_todo_content(content)
                     status = str(_object_value(todo, "status") or "pending")
                     status_label = {
                         "pending": "대기",
@@ -668,6 +882,8 @@ def _extract_agent_traces(result: Any) -> list[AgentTrace]:
                         kind="planning",
                         success=success,
                         detail="\n".join(todo_lines) or "Planning 항목을 구성했습니다.",
+                        trace_id=call_id,
+                        status=status,
                     )
                 )
     return traces
@@ -685,6 +901,54 @@ def _require_planning_trace(traces: list[AgentTrace]) -> None:
         raise ValueError("DeepAgent 기본 write_todos Planning trace가 없습니다.")
 
 
+def _planning_completion(detail: str) -> tuple[int, int]:
+    """공개 Todo 상태 문자열에서 완료 개수만 계산합니다.
+
+    모델의 숨은 생각이 아니라 write_todos가 반환한 명시적 체크리스트 상태입니다.
+    """
+
+    todo_lines = [line for line in detail.splitlines() if line.strip()]
+    completed = sum("[완료" in line for line in todo_lines)
+    return completed, len(todo_lines)
+
+
+def _localize_todo_content(content: str) -> str:
+    """모델이 영어로 만든 공개 Todo를 시연 화면용 한국어 작업명으로 바꿉니다."""
+
+    if re.search(r"[가-힣]", content):
+        return content
+    lowered = content.lower()
+    if "read" in lowered and "skill" in lowered:
+        return "필수 HAZOP·빈도·강도·표준 비교 Skill 문서를 읽고 적용합니다."
+    if "verify" in lowered and ("input" in lowered or "combination" in lowered):
+        return "입력 조합을 보존하고 전체 위험성평가 Row의 원인·결과·안전조치와 근거를 검토합니다."
+    if "tool" in lowered and any(word in lowered for word in ("lookup", "evidence", "necessary", "missing")):
+        return "추가 근거가 필요한지 판단하고 부족한 MSDS·사고이력·표준 HAZOP만 조회합니다."
+    if any(word in lowered for word in ("correction", "corrected", "affected")) and "risk" in lowered:
+        return "문제가 확인된 위험성평가 Row만 수정하고 나머지 Row는 그대로 유지합니다."
+    if "return" in lowered and any(word in lowered for word in ("risk_rows", "action_rows", "review_findings", "result")):
+        return "전체 구조화 결과와 검토 내역을 반환합니다."
+    if "evidence" in lowered and "prior" in lowered:
+        return "선택된 근거 우선순위를 적용합니다."
+    if "draft" in lowered or "generate" in lowered:
+        return "Agent 구조화 초안을 생성합니다."
+    if "review" in lowered or "validate" in lowered or "check" in lowered:
+        return "생성 결과의 누락과 기준 위반을 검토합니다."
+    return "Agent 실행계획의 작업 항목을 수행합니다."
+
+
+def _finalize_returned_planning_detail(detail: str) -> str:
+    """실제 결과 반환 성공으로 마지막 Todo 하나만 안전하게 완료 처리합니다."""
+
+    lines = [line for line in detail.splitlines() if line.strip()]
+    incomplete = [index for index, line in enumerate(lines) if "[완료" not in line]
+    if len(lines) > 0 and incomplete == [len(lines) - 1] and any(
+        marker in lines[-1] for marker in ("[진행 중]", "[대기]")
+    ):
+        lines[-1] = re.sub(r"\[(?:진행 중|대기)\]", "[완료 · 시스템 확인]", lines[-1])
+    return "\n".join(lines)
+
+
 async def _record_trace_events(
     events: list,
     traces: list[AgentTrace],
@@ -694,14 +958,18 @@ async def _record_trace_events(
     planning_traces = [trace for trace in traces if trace.kind == "planning" and trace.success]
     if planning_traces:
         final_plan = planning_traces[-1]
+        final_detail = _finalize_returned_planning_detail(final_plan.detail)
+        completed_todos, total_todos = _planning_completion(final_detail)
         await _record_event(
             events,
             engine_event(
-                "Planning: DeepAgent가 실행계획을 수립하고 완료했습니다.",
-                final_plan.detail,
+                f"Planning 최종 실행 현황 · {completed_todos}/{total_todos} 완료",
+                final_detail,
                 kind="planning",
                 agent_id=agent_id,
                 phase="progress",
+                emphasis=True,
+                event_key=f"{agent_id}:planning" if agent_id else None,
             ),
             progress,
         )
@@ -725,26 +993,6 @@ async def _record_trace_events(
         )
 
 
-async def _record_review_findings(
-    events: list,
-    findings: list[ReviewFinding],
-    progress: ProgressCallback | None,
-    agent_id: str | None = None,
-) -> None:
-    confirmation_count = sum(finding.requires_confirmation for finding in findings)
-    await _record_event(
-        events,
-        engine_event(
-            f"초안 검토 및 보완 결과 · 담당자 확인 필요 {confirmation_count}건",
-            f"총 {len(findings)}건을 보완했습니다. 담당자 확인이 필요한 항목은 {confirmation_count}건입니다.",
-            kind="warning" if confirmation_count else "result",
-            agent_id=agent_id,
-            phase="progress",
-        ),
-        progress,
-    )
-
-
 async def _record_self_correction_events(
     events: list,
     before_rows: list[RiskAssessmentRow],
@@ -759,9 +1007,13 @@ async def _record_self_correction_events(
     """
 
     before_by_no = {row.no: row for row in before_rows}
+    summary_event_key = f"{agent_id}:self-correction-summary"
     changed_count = 0
     maintained_count = 0
     action_target_changed_count = 0
+    changes: list[tuple[int, RiskAssessmentRow, RiskAssessmentRow, list[str], bool]] = []
+    confirmation_count = sum(finding.requires_confirmation for finding in findings)
+    finding_row_count = len({finding.risk_assessment_no for finding in findings if isinstance(finding.risk_assessment_no, int)})
     for after in after_rows:
         before = before_by_no.get(after.no)
         if before is None:
@@ -775,19 +1027,102 @@ async def _record_self_correction_events(
         after_action = "예" if after.risk_score >= 9 else "아니오"
         if before_action != after_action:
             action_target_changed_count += 1
+        changes.append((after.no, before, after, changed_fields, before_action != after_action))
 
     await _record_event(
         events,
         engine_event(
             "Self-Correction: 독립 검토와 수정 반영을 완료했습니다.",
-            f"전체 {len(after_rows)}건 중 수정 {changed_count}건, 검토 후 유지 {maintained_count}건, "
-            f"조치계획 대상 변경 {action_target_changed_count}건입니다. 상세 내용은 아래 '초안 검토 및 보완 내역' 표에서 확인할 수 있습니다.",
+            f"검토 의견 {len(findings)}건 · 의견이 지정한 Row {finding_row_count}건 · 담당자 확인 필요 {confirmation_count}건\n"
+            f"전체 {len(after_rows)}개 Row 중 실제 수정 {changed_count}개, 그대로 유지 {maintained_count}개, "
+            f"조치계획 대상 변경 {action_target_changed_count}개입니다. 담당자 확인 필요 건수는 수정 Row 수와 별도입니다.\n"
+            "대표 카드에서는 '수정 이유 → 적용 내용 → 위험도/조치대상 변화'만 확인하면 됩니다.\n"
+            "대표 변경은 최대 3건만 표시합니다. 선정 순서: ① 조치계획 대상 변경 "
+            "② 위험도 점수 변경 ③ 그 밖의 원인·결과·안전조치·근거 변경. 같은 순위는 평가 Row 번호가 빠른 순서입니다.\n"
+            "전체 검토 내역은 아래 '초안 검토 및 보완 내역' 표에서 확인할 수 있습니다.",
             kind="self-correction",
             agent_id=agent_id,
             phase="progress",
+            emphasis=True,
+            event_key=summary_event_key,
         ),
         progress,
     )
+
+    # 영상에서 읽을 수 있도록 조치 대상 변경 → 점수 변경 → 기타 변경 순서로
+    # 대표 Row만 최대 3건 표시하고 전체 내역은 결과 표에 남깁니다.
+    ranked = sorted(
+        changes,
+        key=lambda item: (
+            not item[4],
+            item[1].risk_score == item[2].risk_score,
+            item[0],
+        ),
+    )
+    findings_by_no: dict[int | str, list[ReviewFinding]] = {}
+    for finding in findings:
+        findings_by_no.setdefault(finding.risk_assessment_no, []).append(finding)
+
+    for row_no, before, after, changed_fields, action_changed in ranked[:3]:
+        related = [*findings_by_no.get("전체", []), *findings_by_no.get(row_no, [])]
+        issue = " / ".join(finding.message for finding in related) or "검토 전후 구조화 결과 비교에서 차이를 확인했습니다."
+        resolution = " / ".join(finding.resolution for finding in related) or ", ".join(changed_fields) + " 항목을 수정했습니다."
+        evidence = _row_evidence_summary(after)
+        before_action = "예" if before.risk_score >= 9 else "아니오"
+        after_action = "예" if after.risk_score >= 9 else "아니오"
+        action_line = (
+            f"조치계획 대상: {before_action} → {after_action}"
+            if action_changed
+            else f"조치계획 대상: {after_action} 유지"
+        )
+        await _record_event(
+            events,
+            engine_event(
+                f"Self-Correction 대표 변경 · 평가 {row_no:03d} · {after.node_name} · {after.parameter}/{after.guideword}",
+                f"수정 이유: {issue}\n"
+                f"적용 내용: {resolution}\n"
+                f"위험도: {before.frequency}×{before.severity}={before.risk_score} → "
+                f"{after.frequency}×{after.severity}={after.risk_score} (시스템 재계산)\n"
+                f"판정: {action_line}\n"
+                f"핵심 근거: {evidence}\n"
+                f"변경 항목: {', '.join(changed_fields)}",
+                kind="self-correction",
+                agent_id=agent_id,
+                phase="progress",
+                emphasis=action_changed or before.risk_score != after.risk_score,
+                parent_kind="self-correction",
+                parent_event_key=summary_event_key,
+                event_key=f"{summary_event_key}:row:{row_no}",
+            ),
+            progress,
+        )
+
+    if len(ranked) > 3:
+        await _record_event(
+            events,
+            engine_event(
+                "Self-Correction 나머지 변경 내역을 결과 표에 보관했습니다.",
+                f"대표 3건 외 {len(ranked) - 3}건은 아래 '초안 검토 및 보완 내역' 표에서 확인할 수 있습니다.",
+                kind="self-correction",
+                agent_id=agent_id,
+                phase="progress",
+                parent_kind="self-correction",
+                parent_event_key=summary_event_key,
+                event_key=f"{summary_event_key}:remaining",
+            ),
+            progress,
+        )
+
+
+def _row_evidence_summary(row: RiskAssessmentRow) -> str:
+    evidence = [
+        *(item.reason for item in row.decision_evidence),
+        *(item.reason for item in row.frequency_evidence),
+        *(item.reason for item in row.severity_evidence),
+    ]
+    unique = list(dict.fromkeys(value.strip() for value in evidence if value.strip()))
+    text = unique[0] if unique else "구조화 검토 근거 확인 필요"
+    return text if len(text) <= 240 else text[:237].rstrip() + "…"
 
 
 def _changed_review_fields(before: RiskAssessmentRow, after: RiskAssessmentRow) -> list[str]:
@@ -806,45 +1141,43 @@ def _changed_review_fields(before: RiskAssessmentRow, after: RiskAssessmentRow) 
     return [label for field, label in labels.items() if getattr(before, field) != getattr(after, field)]
 
 
-def _normalize_review_findings(
-    findings: list[ReviewFinding],
+def _apply_reviewed_rows_for_findings(
     before_rows: list[RiskAssessmentRow],
-    after_rows: list[RiskAssessmentRow],
-) -> list[ReviewFinding]:
-    """검토 표의 위험성평가 번호를 채우고 실제 변경 Row가 빠지지 않게 보완합니다."""
+    reviewed_rows: list[RiskAssessmentRow],
+    findings: list[ReviewFinding],
+) -> list[RiskAssessmentRow]:
+    """검토 의견이 정확한 평가 번호를 지정한 Row에만 수정본을 적용합니다.
 
-    before_by_no = {row.no: row for row in before_rows}
-    changed = {
-        row.no: _changed_review_fields(before_by_no[row.no], row)
-        for row in after_rows
-        if row.no in before_by_no and _changed_review_fields(before_by_no[row.no], row)
-    }
-    normalized = list(findings)
-    if len(changed) == 1:
-        only_changed_no = next(iter(changed))
-        normalized = [
-            finding.model_copy(update={"risk_assessment_no": only_changed_no})
-            if finding.risk_assessment_no == "전체"
-            else finding
-            for finding in normalized
-        ]
+    모델이 전체 배열을 반환하면서 문제없는 문장을 다시 표현하더라도, finding이 없는
+    Row는 시스템 검증본을 그대로 유지해 불필요한 전체 수정 표시를 막습니다.
+    """
 
-    recorded_numbers = {
+    allowed_numbers = {
         finding.risk_assessment_no
-        for finding in normalized
+        for finding in findings
         if isinstance(finding.risk_assessment_no, int)
     }
-    for row_no, changed_fields in changed.items():
-        if row_no in recorded_numbers:
-            continue
-        normalized.append(
-            ReviewFinding(
-                risk_assessment_no=row_no,
-                category="독립 검토 수정",
-                message=f"{', '.join(changed_fields)} 항목이 초안과 달라 검토 결과에 반영되었습니다.",
-                resolution="수정본을 시스템이 다시 검증하고 위험도를 재계산했습니다.",
-            )
+    reviewed_by_no = {row.no: row for row in reviewed_rows}
+    return [reviewed_by_no.get(row.no, row) if row.no in allowed_numbers else row for row in before_rows]
+
+
+def _normalize_review_findings(findings: list[ReviewFinding]) -> list[ReviewFinding]:
+    """같은 Row·구분·지적·조치가 반복된 검토 의견만 제거합니다."""
+
+    normalized: list[ReviewFinding] = []
+    seen: set[tuple[int | str, str, str, str, bool]] = set()
+    for finding in findings:
+        key = (
+            finding.risk_assessment_no,
+            finding.category.strip(),
+            finding.message.strip(),
+            finding.resolution.strip(),
+            finding.requires_confirmation,
         )
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(finding)
     return normalized
 
 
@@ -869,6 +1202,20 @@ def _tool_result_succeeded(message: Any) -> bool:
     return status != "error" and "permission denied" not in lowered and not lowered.startswith("error:")
 
 
+def _tool_result_summary(message: Any, limit: int = 500) -> str:
+    """콘솔/화면을 과도하게 채우지 않도록 Tool 결과를 짧게 정리합니다."""
+
+    if message is None:
+        return "실행 중"
+    content = _message_value(message, "content")
+    if isinstance(content, (dict, list)):
+        text = json.dumps(content, ensure_ascii=False, default=str)
+    else:
+        text = str(content or "결과 본문 없음")
+    compact = " ".join(text.split())
+    return compact if len(compact) <= limit else compact[:limit].rstrip() + "…"
+
+
 def _apply_confirmation_findings(
     rows: list[RiskAssessmentRow],
     findings: list[ReviewFinding],
@@ -877,12 +1224,12 @@ def _apply_confirmation_findings(
 
     confirmation_by_no: dict[int | str, list[str]] = {}
     for finding in findings:
-        if finding.requires_confirmation:
+        if finding.requires_confirmation and isinstance(finding.risk_assessment_no, int):
             confirmation_by_no.setdefault(finding.risk_assessment_no, []).append(finding.message)
 
     updated: list[RiskAssessmentRow] = []
     for row in rows:
-        messages = [*confirmation_by_no.get("전체", []), *confirmation_by_no.get(row.no, [])]
+        messages = confirmation_by_no.get(row.no, [])
         if not messages:
             updated.append(row)
             continue
@@ -956,6 +1303,7 @@ def _risk_system_prompt() -> str:
     return """
 너는 #3 위험성평가를 작성하는 risk-draft-agent이다.
 작업을 시작하면 DeepAgent 기본 write_todos Tool을 먼저 호출하여 아래 작업을 5개 안팎의 실행 항목으로 계획하고 그 순서대로 수행한다.
+write_todos의 content는 사용자가 읽을 수 있도록 반드시 한국어로 작성한다.
 계획에는 입력 조합 확인, 근거 우선순위 적용, #3 초안 작성, 자체 누락 확인, 구조화 결과 반환을 포함한다.
 작업을 시작할 때 hazop-risk-draft, frequency-estimation, severity-estimation Skill의 SKILL.md 전체를 read_file로 반드시 읽고 따른다.
 사용자가 제공한 #1 노드리스트와 #2 가이드워드 기준으로만 초안을 작성한다.
@@ -975,12 +1323,16 @@ def _review_system_prompt() -> str:
     return """
 너는 초안 작성자와 분리된 독립 risk-review-agent이다.
 작업을 시작하면 DeepAgent 기본 write_todos Tool을 먼저 호출하여 아래 검토를 5개 안팎의 실행 항목으로 계획하고 그 순서대로 수행한다.
+write_todos의 content는 사용자가 읽을 수 있도록 반드시 한국어로 작성한다.
 계획에는 입력 조합 보존 확인, 검토 Skill 적용, 원인·결과·점수 근거 검토, 필요한 보완 Tool 판단, 수정본과 검토 내역 반환을 포함한다.
 작업을 시작할 때 hazop-risk-review, severity-estimation, standard-hazop-comparison Skill의 SKILL.md 전체를 read_file로 반드시 읽고 따른다.
 시스템 검증을 통과한 #3 위험성평가 전체 Row의 의미, 논리, 근거 품질을 검토한다.
 원인-결과 연결, 고위험 물질 강도 과소평가, 안전조치의 예방/완화 역할, MSDS 모순, 사고이력·표준 HAZOP 대비 과소평가를 확인한다.
 필요한 정보가 부족한 경우에만 MSDS 상세, 사고이력, 표준 HAZOP Tool로 보완 조회한다.
 문제가 있으면 지적만 하지 말고 risk_rows 전체에 수정 내용을 반영한다.
+실제 결함이 없는 Row는 문장 표현, 단어, 근거 순서, 비고를 포함해 시스템 검증본 그대로 반환한다. 문장 다듬기나 동의어 치환만을 위한 수정은 금지한다.
+수정하는 모든 Row에는 해당 no를 risk_assessment_no로 명시한 review_finding을 최소 1개 작성한다.
+risk_assessment_no="전체" 의견은 공통 확인사항 기록용이며 개별 Row 수정의 허가로 사용하지 않는다.
 Node, 변수, Guideword, Row 개수와 no는 절대 바꾸지 않는다.
 위험도는 시스템이 다시 계산하므로 risk_score는 0으로 둔다.
 """.strip()
@@ -990,6 +1342,7 @@ def _action_system_prompt() -> str:
     return """
 너는 #4 조치계획서를 작성하는 action-plan-agent이다.
 작업을 시작하면 DeepAgent 기본 write_todos Tool을 먼저 호출하여 아래 작업을 5개 안팎의 실행 항목으로 계획하고 그 순서대로 수행한다.
+write_todos의 content는 사용자가 읽을 수 있도록 반드시 한국어로 작성한다.
 계획에는 고위험 Row 확인, 조치 Skill 적용, 현재 방어의 부족점 분석, 필요한 보완 Tool 판단, 조치계획과 잔여위험 근거 반환을 포함한다.
 작업을 시작할 때 hazop-action-plan과 severity-estimation Skill의 SKILL.md 전체를 read_file로 반드시 읽고 따른다.
 독립 검토가 반영되고 시스템이 위험도 9 이상으로 선별한 Row만 대상으로 LLM 초안을 작성한다.
@@ -1023,6 +1376,12 @@ def _risk_user_prompt(context: HazopDraftContext) -> str:
 
 MSDS 요약:
 { {key: value.__dict__ for key, value in context.msds_context.items()} }
+
+Workflow가 선조회한 사고·정비 이력 Context:
+{context.incident_history_context.model_dump_json(indent=2)}
+
+Workflow가 선조회한 표준 HAZOP Context:
+{context.standard_hazop_context.model_dump_json(indent=2)}
 
 업로드 위험도 기준표:
 {_criteria_json(context)}
@@ -1063,6 +1422,12 @@ def _review_user_prompt(
 Workflow 최초 MSDS 조회 요약:
 { {key: value.__dict__ for key, value in context.msds_context.items()} }
 
+Workflow가 선조회한 사고·정비 이력 Context:
+{context.incident_history_context.model_dump_json(indent=2)}
+
+Workflow가 선조회한 표준 HAZOP Context:
+{context.standard_hazop_context.model_dump_json(indent=2)}
+
 업로드 위험도 기준표:
 {_criteria_json(context)}
 
@@ -1071,9 +1436,13 @@ Workflow 최초 MSDS 조회 요약:
 
 필수 규칙:
 - 원인 현실성, 원인-결과 연결, 강도 과소평가, 안전조치의 예방/완화 역할, MSDS 모순을 확인한다.
+- 사고·정비 이력보다 빈도를 낮게 평가했다면 공정 차이 또는 안전조치 차이 근거가 있는지 확인한다.
 - 표준 HAZOP보다 위험을 낮게 평가했다면 구체적인 차이 근거가 있는지 확인한다.
 - no, node_order, node_name, parameter, guideword와 Row 개수는 입력 그대로 유지한다.
 - 검토 수정 내용을 risk_rows에 실제로 반영한다.
+- 실제 오류나 근거 결함이 확인된 Row만 수정한다. 더 자연스러운 표현으로 바꾸기 위한 재작성은 하지 않는다.
+- 수정한 각 Row마다 정확한 평가 no의 review_finding을 작성한다. finding이 없는 Row는 시스템이 원본 초안으로 되돌린다.
+- 공통 의견은 risk_assessment_no="전체"로 기록할 수 있지만, 이 값으로 전체 Row를 수정하지 않는다.
 - 강도는 동일한 업로드 기준표와 MSDS 출처를 사용해 재검토한다.
 - risk_score는 0, risk_level은 "계산 전", action_required는 "계산 전"으로 돌려놓는다.
 """.strip()
@@ -1098,6 +1467,12 @@ def _action_user_prompt(context: HazopDraftContext, high_risk_rows: list[RiskAss
 
 MSDS 요약:
 { {key: value.__dict__ for key, value in context.msds_context.items()} }
+
+Workflow가 선조회한 사고·정비 이력 Context:
+{context.incident_history_context.model_dump_json(indent=2)}
+
+Workflow가 선조회한 표준 HAZOP Context:
+{context.standard_hazop_context.model_dump_json(indent=2)}
 
 업로드 위험도 기준표:
 {_criteria_json(context)}
@@ -1256,6 +1631,57 @@ def _generate_risk_rows_demo(context: HazopDraftContext) -> list[RiskAssessmentR
             if context.risk_criteria is None or context.risk_criteria.requires_confirmation
             else ""
         )
+        standard_evidence = next(
+            (
+                evidence
+                for evidence in context.standard_hazop_context.evidence
+                if item.node_name.lower() in evidence.lower()
+            ),
+            context.standard_hazop_context.evidence[0] if context.standard_hazop_context.evidence else "",
+        )
+        incident_record = next(
+            (
+                record
+                for record in context.incident_history_context.matched_records
+                if item.node_name.lower() in str(record.get("node", "")).lower()
+                and item.parameter.lower() == str(record.get("parameter", "")).lower()
+                and item.guideword.lower() == str(record.get("guideword", "")).lower()
+            ),
+            None,
+        )
+        if incident_record:
+            incident_frequency = int(incident_record.get("frequency_hint", frequency))
+            frequency = max(1, min(5, incident_frequency))
+            frequency_criterion = _criterion_description(context, "빈도", frequency)
+            incident_evidence = (
+                f"{incident_record.get('record_id')} · {incident_record.get('event_date')} · "
+                f"{incident_record.get('summary')}"
+            )
+            decision += f" 로컬 사고·정비 이력 비교 근거: {incident_evidence}"
+            frequency_reason = (
+                f"동일 Node·변수·Guideword의 PoC 합성 사고·정비 이력에서 빈도 참고값 "
+                f"{frequency}를 확인했습니다. 적용 기준: {frequency_criterion}. "
+                f"비교 근거: {incident_evidence}"
+            )
+            frequency_source = "로컬 사고·정비 이력 JSON + 빈도 기준표"
+            result_note = "Deepagent fallback 초안 - 로컬 사고·정비 이력 비교 적용"
+        elif standard_evidence:
+            decision += f" 로컬 표준 HAZOP 비교 근거: {standard_evidence}"
+            frequency_reason = (
+                f"로컬 표준 HAZOP {context.standard_hazop_context.document_title}의 유사 Row를 비교하고, "
+                f"사용자 사고·정비 이력과 Guideword 특성을 함께 고려해 빈도 {frequency} 후보를 제안합니다. "
+                f"적용 기준: {frequency_criterion}. 비교 근거: {standard_evidence}"
+            )
+            frequency_source = "로컬 표준 HAZOP + 사용자 사고·정비 이력 + 빈도 기준표"
+            result_note = "Deepagent fallback 초안 - 로컬 표준 HAZOP 비교 적용"
+        else:
+            frequency_reason = (
+                "일치하는 로컬 사고·정비 이력 또는 표준 HAZOP Row가 없어 "
+                f"Guideword 특성과 사용자 비고를 기준으로 빈도 {frequency} 후보를 제안합니다. "
+                f"적용 기준: {frequency_criterion}."
+            )
+            frequency_source = "IncidentHistoryAnalysisSkill + FrequencyEstimationSkill fallback"
+            result_note = "Deepagent fallback 초안 - 사고이력/표준 HAZOP 확인 필요"
 
         rows.append(
             RiskAssessmentRow(
@@ -1273,19 +1699,15 @@ def _generate_risk_rows_demo(context: HazopDraftContext) -> list[RiskAssessmentR
                 risk_score=0,
                 risk_level="계산 전",
                 action_required="계산 전",
-                decision_evidence=[AgentEvidence(reason=decision, source="Node/Guideword + MSDS")],
+                decision_evidence=[AgentEvidence(reason=decision, source="Node/Guideword + MSDS + 사고·정비 이력 + 표준 HAZOP")],
                 severity_evidence=[AgentEvidence(reason=severity_reason, source="MSDS 위험성 + 영향 범위")],
                 frequency_evidence=[
                     AgentEvidence(
-                        reason=(
-                            "현재 PoC에는 사고이력 DB와 표준 HAZOP 문서 조회 인덱스가 없어 "
-                            f"Guideword 특성과 사용자 비고를 기준으로 빈도 {frequency} 후보를 제안합니다. "
-                            f"적용 기준: {frequency_criterion}."
-                        ),
-                        source="IncidentHistoryAnalysisSkill + FrequencyEstimationSkill fallback",
+                        reason=frequency_reason,
+                        source=frequency_source,
                     )
                 ],
-                note="Deepagent fallback 초안 - 사고이력/표준 HAZOP 확인 필요" + criteria_note,
+                note=result_note + criteria_note,
             )
         )
     return rows
