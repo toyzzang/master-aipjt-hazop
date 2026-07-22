@@ -85,17 +85,33 @@ type HazopResult = {
   mode?: string;
 };
 
+const ASM_DEMO_DEFAULTS = {
+  maker: "ASM",
+  model: "Epsilon3200",
+  similarHazopId: "STD-HAZOP-SPECIALTY-GAS-2026-001",
+  operationIntent:
+    "ASM Epsilon3200 공정에 Silane과 Hydrogen을 정해진 유량으로 공급하고 Nitrogen으로 Purge하는 운전입니다.\nGas Cabinet 누출·파열, 배관 역류·공급 저하, MFC 유량·신호 이상, Purge 실패·과다 시 위험을 검토합니다.",
+  incidentHistory:
+    "최근 3년간 화재·폭발 및 인적 재해 없음.\n최근 1년간 Gas Cabinet 누출감지 경보 2회, MFC High Flow Alarm 2회, Purge 시작 실패로 완료 신호가 들어오지 않은 Near Miss 3회가 있었음.\n세 유형 모두 실제 화재·폭발 및 인적 피해로 이어지지 않았고 누설시험, MFC 교정, Purge Sequence 점검을 수행함.",
+} as const;
+
+const ASM_NODE_MATERIAL_DEFAULTS: Record<string, string> = {
+  "Gas Cabinet": "Silane, Hydrogen",
+  "VMB 및 공급 배관": "",
+  "MFC 유량 제어 구간": "Silane",
+  "Purge 및 Scrubber 구간": "Nitrogen, Silane, Hydrogen",
+};
+
 function App() {
+  // 일반 접속은 빠른 로컬 테스트를 위해 ASM 예시값을 실제 기본값으로 사용합니다.
+  // 영상 촬영은 /?recording=1로 접속해 빈 입력 화면에서 시작합니다.
+  const isRecordingMode = new URLSearchParams(window.location.search).get("recording") === "1";
   const [file, setFile] = useState<File | null>(null);
-  const [maker, setMaker] = useState("ColdChain");
-  const [model, setModel] = useState("NH3-Refrigeration");
-  const [similarHazopId, setSimilarHazopId] = useState("STD-HAZOP-NH3-REFRIGERATION-2026-001");
-  const [operationIntent, setOperationIntent] = useState(
-    "ColdChain NH3-Refrigeration 냉동설비의 정상운전 및 비정상 상태 검토용입니다.\n액체 암모니아 저장, 압축, 오일 분리, 응축, 팽창, 증발 과정에서 과압·저압·과열·냉각 상실·누출 시나리오를 검토합니다.",
-  );
-  const [incidentHistory, setIncidentHistory] = useState(
-    "최근 3년간 사망·중대재해 없음.\n최근 1년간 Compressor 토출압 High Alarm 2회, Expansion Valve 결빙으로 유량 저하 1회, Machine Room 암모니아 감지기 경보 1회가 있었으며 실제 대량 누출은 확인되지 않음.\n정기점검 시 Compressor Mechanical Seal과 Receiver 연결부 미세 누설 여부를 중점 확인함.",
-  );
+  const [maker, setMaker] = useState(isRecordingMode ? "" : ASM_DEMO_DEFAULTS.maker);
+  const [model, setModel] = useState(isRecordingMode ? "" : ASM_DEMO_DEFAULTS.model);
+  const [similarHazopId, setSimilarHazopId] = useState(isRecordingMode ? "" : ASM_DEMO_DEFAULTS.similarHazopId);
+  const [operationIntent, setOperationIntent] = useState(isRecordingMode ? "" : ASM_DEMO_DEFAULTS.operationIntent);
+  const [incidentHistory, setIncidentHistory] = useState(isRecordingMode ? "" : ASM_DEMO_DEFAULTS.incidentHistory);
   const [preview, setPreview] = useState<PreviewData>({ nodes: [], guidewords: [] });
   const [nodeMaterials, setNodeMaterials] = useState<Record<string, string>>({});
   const [isPreviewLoading, setIsPreviewLoading] = useState(false);
@@ -157,7 +173,8 @@ function App() {
       setPreview(nextPreview);
       const nextMaterials: Record<string, string> = {};
       nextPreview.nodes.forEach((node: NodeRow) => {
-        nextMaterials[node.node_name] = nodeMaterials[node.node_name] || "";
+        nextMaterials[node.node_name] =
+          nodeMaterials[node.node_name] || (isRecordingMode ? "" : ASM_NODE_MATERIAL_DEFAULTS[node.node_name] || "");
       });
       setNodeMaterials(nextMaterials);
     } catch (err) {
@@ -446,12 +463,29 @@ function App() {
                 <span>xlsx 파일을 업로드하면 Node List를 자동으로 읽습니다.</span>
               </label>
               <div className="field-grid two">
-                <Field label="Maker" value={maker} onChange={setMaker} />
-                <Field label="Model" value={model} onChange={setModel} />
+                <Field label="Maker" value={maker} placeholder="예: ASM" onChange={setMaker} />
+                <Field label="Model" value={model} placeholder="예: Epsilon3200" onChange={setModel} />
               </div>
-              <Field label="유사 HAZOP 문서 ID" value={similarHazopId} onChange={setSimilarHazopId} />
-              <Textarea label="운전 의도" value={operationIntent} onChange={setOperationIntent} rows={4} />
-              <Textarea label="사고 정비 이력" value={incidentHistory} onChange={setIncidentHistory} rows={4} />
+              <Field
+                label="유사 HAZOP 문서 ID"
+                value={similarHazopId}
+                placeholder="예: STD-HAZOP-SPECIALTY-GAS-2026-001"
+                onChange={setSimilarHazopId}
+              />
+              <Textarea
+                label="운전 의도"
+                value={operationIntent}
+                placeholder="예: ASM Epsilon3200 공정에 Silane과 Hydrogen을 정해진 유량으로 공급하고 Nitrogen으로 Purge하는 운전입니다."
+                onChange={setOperationIntent}
+                rows={4}
+              />
+              <Textarea
+                label="사고 정비 이력"
+                value={incidentHistory}
+                placeholder="예: 최근 1년간 Gas Cabinet 누출감지 경보 2회, MFC High Flow Alarm 2회, Purge 시작 실패 Near Miss 3회가 있었습니다."
+                onChange={setIncidentHistory}
+                rows={4}
+              />
               {error ? <div className="error-message">{error}</div> : null}
               <button className="primary-button" type="submit">
                 AI 초안생성
@@ -611,20 +645,42 @@ function App() {
   );
 }
 
-function Field({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+function Field({
+  label,
+  value,
+  placeholder,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  placeholder?: string;
+  onChange: (value: string) => void;
+}) {
   return (
     <label className="field">
       <span>{label}</span>
-      <input value={value} onChange={(event) => onChange(event.target.value)} />
+      <input value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
     </label>
   );
 }
 
-function Textarea({ label, value, onChange, rows }: { label: string; value: string; onChange: (value: string) => void; rows: number }) {
+function Textarea({
+  label,
+  value,
+  placeholder,
+  onChange,
+  rows,
+}: {
+  label: string;
+  value: string;
+  placeholder?: string;
+  onChange: (value: string) => void;
+  rows: number;
+}) {
   return (
     <label className="field">
       <span>{label}</span>
-      <textarea value={value} rows={rows} onChange={(event) => onChange(event.target.value)} />
+      <textarea value={value} placeholder={placeholder} rows={rows} onChange={(event) => onChange(event.target.value)} />
     </label>
   );
 }
@@ -782,9 +838,9 @@ const NODE_MATERIAL_EXAMPLES: Record<string, string> = {
   "DI Water 공급 탱크": "DI Water",
   "DI Water 이송 펌프": "DI Water",
   "Wet 장비 공급 배관": "DI Water",
-  "Gas Cabinet": "Silane, Hydrogen, Nitrogen",
-  "VMB 및 공급 배관": "Silane, Hydrogen, Nitrogen",
-  "MFC 유량 제어 구간": "Silane, Hydrogen, Nitrogen",
+  "Gas Cabinet": "Silane, Hydrogen",
+  "VMB 및 공급 배관": "입력하지 않음",
+  "MFC 유량 제어 구간": "Silane",
   "Purge 및 Scrubber 구간": "Nitrogen, Silane, Hydrogen",
   "Etch Chamber": "HF, Nitrogen",
   "Vacuum Pump Line": "HF, Nitrogen",
